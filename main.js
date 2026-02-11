@@ -23,6 +23,12 @@
 		llmMaxTokens: 2048,
 		llmTemperature: 0.1,
 
+		// Editing
+		// If true, saves edits via the API (with an optional tag) instead of
+		// just opening the edit form. By default this is false so users always
+		// review the diff manually.
+		useApiEdit: false,
+
 		// Subcategory tree crawl limits
 		maxTreeDepth: 5,
 		maxTreeNodes: 2000,
@@ -59,73 +65,6 @@
 	// -----------------------------------------------------------------------
 	function injectStyles() {
 		var css = [
-			/* Analyse button */
-			'#catdiff-analyse-btn {',
-			'  display: inline-block;',
-			'  margin: 8px 0;',
-			'  padding: 8px 18px;',
-			'  background: #d33;',
-			'  color: #fff;',
-			'  font-weight: bold;',
-			'  font-size: 14px;',
-			'  border: none;',
-			'  border-radius: 4px;',
-			'  cursor: pointer;',
-			'}',
-			'#catdiff-analyse-btn:hover { background: #b32424; }',
-			'#catdiff-analyse-btn:disabled {',
-			'  background: #999;',
-			'  cursor: not-allowed;',
-			'}',
-			'#catdiff-analyse-btn.catdiff-done {',
-			'  background: #14866d;',
-			'}',
-
-			/* Status text */
-			'#catdiff-status {',
-			'  display: inline-block;',
-			'  margin-left: 12px;',
-			'  font-size: 13px;',
-			'  color: #555;',
-			'}',
-
-			/* Toolbar hint text */
-			'#catdiff-hint {',
-			'  display: block;',
-			'  font-size: 12px;',
-			'  color: #72777d;',
-			'  margin: 2px 0 6px 0;',
-			'}',
-
-			/* Done message — prompts user to check suggestions */
-			'#catdiff-done-msg {',
-			'  display: none;',
-			'  margin: 8px 0;',
-			'  padding: 8px 12px;',
-			'  background: #eaf3ff;',
-			'  border-left: 3px solid #36c;',
-			'  font-size: 13px;',
-			'  color: #222;',
-			'  border-radius: 2px;',
-			'}',
-
-			/* Reviewed progress counter */
-			'#catdiff-progress {',
-			'  display: none;',
-			'  font-size: 12px;',
-			'  color: #555;',
-			'  margin: 4px 0;',
-			'}',
-
-			/* Pulse animation while analysing */
-			'@keyframes catdiff-pulse {',
-			'  0% { opacity: 1; }',
-			'  50% { opacity: 0.6; }',
-			'  100% { opacity: 1; }',
-			'}',
-			'#catdiff-analyse-btn.catdiff-running {',
-			'  animation: catdiff-pulse 1.5s ease-in-out infinite;',
-			'}',
 
 			/* Per-thumbnail suggest buttons */
 			'.catdiff-suggest-btn {',
@@ -306,6 +245,16 @@
 			'  text-align: center;',
 			'  padding: 24px;',
 			'  color: #72777d;',
+			'}',
+
+			/* Progress status */
+			'#catdiff-progress-status {',
+			'  margin: 8px 0;',
+			'  line-height: 1.5;',
+			'  color: #222;',
+			'}',
+			'#catdiff-progress-stages {',
+			'  margin-top: 12px;',
 			'}',
 
 			/* Push content left when panel is open */
@@ -745,7 +694,10 @@
 		state.subcategories = [];
 		state.fileMetadata = {};
 		state.analysisStatus = 'running';
-		updateAnalyseButton();
+		// Now that the analysis has been started explicitly by the user,
+		// (re)inject per-thumbnail buttons so they appear only after the
+		// script has been run at least once.
+		injectThumbnailButtons();
 		updateThumbnailButtons();
 
 		// Step 1: Crawl subcategory tree
@@ -755,8 +707,8 @@
 			if ( subcatTitles.length === 0 ) {
 				state.analysisStatus = 'done';
 				state.suggestions = {};
-				updateAnalyseButton();
 				updateStatus( 'No subcategories found.' );
+				updatePanelProgress( 'No subcategories found.' );
 				return;
 			}
 
@@ -778,8 +730,8 @@
 					state.analysisStatus = 'done';
 					state.suggestions = {};
 					saveCachedSuggestions();
-					updateAnalyseButton();
 					updateStatus( 'No files found in category.' );
+					updatePanelProgress( 'No files found in category.' );
 					return;
 				}
 
@@ -797,8 +749,9 @@
 			} );
 		} ).fail( function ( err ) {
 			state.analysisStatus = 'error';
-			updateAnalyseButton();
-			updateStatus( 'Error: ' + ( err && err.message || err || 'Analysis failed.' ) );
+			var errorMsg = 'Error: ' + ( err && err.message || err || 'Analysis failed.' );
+			updateStatus( errorMsg );
+			updatePanelProgress( errorMsg );
 		} );
 	}
 
@@ -829,8 +782,8 @@
 
 				state.analysisStatus = 'done';
 				saveCachedSuggestions();
-				updateAnalyseButton();
 				updateThumbnailButtons();
+				updatePanelProgress();
 				return $.Deferred().resolve().promise();
 			}
 
@@ -876,128 +829,152 @@
 	// -----------------------------------------------------------------------
 	// UI: Analyse button
 	// -----------------------------------------------------------------------
-	function createAnalyseButton() {
-		var $wrapper = $( '<div>' ).attr( 'id', 'catdiff-toolbar' );
-		var $btn = $( '<button>' )
-			.attr( 'id', 'catdiff-analyse-btn' )
-			.text( 'Analyse category' );
-		var $status = $( '<span>' ).attr( 'id', 'catdiff-status' );
-		var $hint = $( '<span>' ).attr( 'id', 'catdiff-hint' )
-			.text( 'Suggests subcategories for each file using an LLM. May take 1\u20132 minutes for large categories.' );
-		var $doneMsg = $( '<div>' ).attr( 'id', 'catdiff-done-msg' );
-		var $progress = $( '<div>' ).attr( 'id', 'catdiff-progress' );
-
-		$btn.on( 'click.catdiffusion', function ( e ) {
-			e.preventDefault();
-			startAnalysis();
-		} );
-
-		$wrapper.append( $btn, $status, $hint, $doneMsg, $progress );
-		$( '#mw-content-text' ).prepend( $wrapper );
-	}
-
-	function updateAnalyseButton() {
-		var $btn = $( '#catdiff-analyse-btn' );
-		var $status = $( '#catdiff-status' );
-		var $hint = $( '#catdiff-hint' );
-		var $doneMsg = $( '#catdiff-done-msg' );
-
-		switch ( state.analysisStatus ) {
-			case 'idle':
-				$btn.text( 'Analyse category' ).prop( 'disabled', false )
-					.removeClass( 'catdiff-done catdiff-running' );
-				$status.text( '' );
-				$hint.show();
-				$doneMsg.hide();
-				break;
-			case 'running':
-				$btn.text( 'Analysing…' ).prop( 'disabled', true )
-					.removeClass( 'catdiff-done' ).addClass( 'catdiff-running' );
-				$hint.hide();
-				$doneMsg.hide();
-				break;
-			case 'done':
-				var fileCount = Object.keys( state.suggestions ).length;
-				var withSuggestions = 0;
-				var key;
-				for ( key in state.suggestions ) {
-					if ( state.suggestions.hasOwnProperty( key ) &&
-						state.suggestions[ key ].length > 0 ) {
-						withSuggestions++;
-					}
-				}
-				$btn.text( 'Re-analyse' ).prop( 'disabled', false )
-					.addClass( 'catdiff-done' ).removeClass( 'catdiff-running' );
-				$status.text(
-					withSuggestions + ' of ' + fileCount +
-					' files have suggestions (' +
-					state.subcategories.length + ' subcategories)'
-				);
-				$hint.hide();
-
-				if ( withSuggestions > 0 ) {
-					$doneMsg
-						.html(
-							'&#9989; Analysis complete. Look for the green ' +
-							'<b>View suggestions</b> buttons below each thumbnail.'
-						)
-						.show();
-				} else {
-					$doneMsg
-						.html( 'Analysis complete. No suggestions were generated for any file.' )
-						.show();
-				}
-
-				updateProgress();
-				break;
-			case 'error':
-				$btn.text( 'Retry analysis' ).prop( 'disabled', false )
-					.removeClass( 'catdiff-done catdiff-running' );
-				$hint.hide();
-				$doneMsg.hide();
-				break;
-		}
-	}
-
-	function updateProgress() {
-		var $progress = $( '#catdiff-progress' );
-		if ( state.analysisStatus !== 'done' ) {
-			$progress.hide();
-			return;
-		}
-
-		var totalWithSuggestions = 0;
-		var reviewed = 0;
-		var key;
-		for ( key in state.suggestions ) {
-			if ( !state.suggestions.hasOwnProperty( key ) ) {
-				continue;
-			}
-			if ( state.suggestions[ key ].length > 0 ) {
-				totalWithSuggestions++;
-				if ( state.reviewedFiles[ key ] ) {
-					reviewed++;
-				}
-			}
-		}
-
-		if ( totalWithSuggestions > 0 ) {
-			$progress
-				.text( 'Progress: ' + reviewed + ' of ' + totalWithSuggestions + ' files reviewed' )
-				.show();
-		} else {
-			$progress.hide();
+	function createToolsLink() {
+		var portletLink = mw.util.addPortletLink(
+			'p-tb',
+			'#',
+			'Diffusor',
+			't-catdiffusion',
+			'Analyse this category with Diffusor'
+		);
+		if ( portletLink ) {
+			$( portletLink ).on( 'click.catdiffusion', function ( e ) {
+				e.preventDefault();
+				openAnalysisPanel();
+				startAnalysis();
+			} );
 		}
 	}
 
 	function updateStatus( text ) {
-		$( '#catdiff-status' ).text( text );
+		updatePanelProgress( text );
+	}
+
+	function updatePanelProgress( currentStatus ) {
+		var $status = $( '#catdiff-progress-status' );
+		var $stages = $( '#catdiff-progress-stages' );
+		
+		if ( !currentStatus ) {
+			currentStatus = '';
+		}
+
+		var stages = [];
+		var currentStage = 'idle';
+
+		if ( state.analysisStatus === 'running' ) {
+			// Determine which stage we're in based on status text
+			if ( currentStatus.indexOf( 'Crawling' ) >= 0 || currentStatus.indexOf( 'Depth' ) >= 0 ) {
+				currentStage = 'crawling';
+				stages.push( { name: 'Crawling subcategory tree', status: 'active', detail: currentStatus } );
+				stages.push( { name: 'Fetching files', status: 'pending' } );
+				stages.push( { name: 'Fetching file metadata', status: 'pending' } );
+				stages.push( { name: 'Analyzing with LLM', status: 'pending' } );
+			} else if ( currentStatus.indexOf( 'Fetching files' ) >= 0 || currentStatus.indexOf( 'Found' ) >= 0 && currentStatus.indexOf( 'subcategories' ) >= 0 ) {
+				currentStage = 'fetching-files';
+				stages.push( { name: 'Crawling subcategory tree', status: 'done' } );
+				stages.push( { name: 'Fetching files', status: 'active', detail: currentStatus } );
+				stages.push( { name: 'Fetching file metadata', status: 'pending' } );
+				stages.push( { name: 'Analyzing with LLM', status: 'pending' } );
+			} else if ( currentStatus.indexOf( 'Fetching metadata' ) >= 0 || currentStatus.indexOf( 'batch' ) >= 0 && currentStatus.indexOf( 'metadata' ) >= 0 ) {
+				currentStage = 'fetching-metadata';
+				stages.push( { name: 'Crawling subcategory tree', status: 'done' } );
+				stages.push( { name: 'Fetching files', status: 'done' } );
+				stages.push( { name: 'Fetching file metadata', status: 'active', detail: currentStatus } );
+				stages.push( { name: 'Analyzing with LLM', status: 'pending' } );
+			} else if ( currentStatus.indexOf( 'LLM' ) >= 0 || currentStatus.indexOf( 'batch' ) >= 0 ) {
+				currentStage = 'llm';
+				stages.push( { name: 'Crawling subcategory tree', status: 'done' } );
+				stages.push( { name: 'Fetching files', status: 'done' } );
+				stages.push( { name: 'Fetching file metadata', status: 'done' } );
+				stages.push( { name: 'Analyzing with LLM', status: 'active', detail: currentStatus } );
+			} else {
+				// Fallback: show all stages with current status
+				stages.push( { name: 'Crawling subcategory tree', status: 'pending' } );
+				stages.push( { name: 'Fetching files', status: 'pending' } );
+				stages.push( { name: 'Fetching file metadata', status: 'pending' } );
+				stages.push( { name: 'Analyzing with LLM', status: 'pending' } );
+			}
+		} else if ( state.analysisStatus === 'done' ) {
+			var fileCount = Object.keys( state.suggestions ).length;
+			var withSuggestions = 0;
+			var key;
+			for ( key in state.suggestions ) {
+				if ( state.suggestions.hasOwnProperty( key ) &&
+					state.suggestions[ key ].length > 0 ) {
+					withSuggestions++;
+				}
+			}
+			
+			stages.push( { name: 'Crawling subcategory tree', status: 'done' } );
+			stages.push( { name: 'Fetching files', status: 'done' } );
+			stages.push( { name: 'Fetching file metadata', status: 'done' } );
+			stages.push( { name: 'Analyzing with LLM', status: 'done' } );
+			
+			if ( withSuggestions > 0 ) {
+				$status.html(
+					'<strong style="color: #14866d;">✓ Analysis complete!</strong><br>' +
+					withSuggestions + ' of ' + fileCount + ' files have suggestions.<br>' +
+					'Look for the green <b>View suggestions</b> buttons below each thumbnail.'
+				);
+			} else {
+				$status.html(
+					'<strong>Analysis complete.</strong><br>' +
+					'No suggestions were generated for any file.'
+				);
+			}
+		} else if ( state.analysisStatus === 'error' ) {
+			$status.html( '<strong style="color: #d33;">Error:</strong> ' + ( currentStatus || 'Analysis failed.' ) );
+			stages.push( { name: 'Crawling subcategory tree', status: 'error' } );
+		} else {
+			$status.text( currentStatus || 'Ready to start analysis.' );
+		}
+
+		// Render stages
+		if ( stages.length > 0 ) {
+			var html = '<ul style="list-style: none; padding: 0; margin: 12px 0;">';
+			var i, len, stage, icon, color;
+			for ( i = 0, len = stages.length; i < len; i++ ) {
+				stage = stages[ i ];
+				if ( stage.status === 'done' ) {
+					icon = '✓';
+					color = '#14866d';
+				} else if ( stage.status === 'active' ) {
+					icon = '⟳';
+					color = '#36c';
+				} else if ( stage.status === 'error' ) {
+					icon = '✗';
+					color = '#d33';
+				} else {
+					icon = '○';
+					color = '#999';
+				}
+				html += '<li style="padding: 4px 0; color: ' + color + ';">';
+				html += '<span style="font-weight: bold; margin-right: 6px;">' + icon + '</span>';
+				html += stage.name;
+				if ( stage.detail ) {
+					html += ' <span style="font-size: 11px; color: #72777d;">(' + stage.detail + ')</span>';
+				}
+				html += '</li>';
+			}
+			html += '</ul>';
+			$stages.html( html );
+		} else {
+			$stages.empty();
+		}
 	}
 
 	// -----------------------------------------------------------------------
 	// UI: Per-thumbnail suggest buttons
 	// -----------------------------------------------------------------------
 	function injectThumbnailButtons() {
+		// Hide per-thumbnail buttons until the script has actually been run
+		// (or cached results are available). This avoids showing disabled
+		// "View suggestions" buttons on first page load before analysis.
+		if ( state.analysisStatus === 'idle' &&
+			!Object.keys( state.suggestions ).length ) {
+			return;
+		}
+
 		var $galleryItems = $( '.gallerybox' );
 		var i, len, $item, $link, fileTitle, $btn;
 
@@ -1097,24 +1074,33 @@
 		var html = [
 			'<div id="catdiff-panel">',
 			'  <button id="catdiff-panel-close" title="Close panel">&times;</button>',
-			'  <h3 id="catdiff-panel-title">File details</h3>',
-			'  <img id="catdiff-panel-thumb" src="" alt="" />',
-			'  <div class="catdiff-section">',
-			'    <div class="catdiff-section-title">Description</div>',
-			'    <div id="catdiff-description"></div>',
+			'  <h3 id="catdiff-panel-title">Diffusor</h3>',
+			'  <div id="catdiff-panel-analysis-view">',
+			'    <div class="catdiff-section">',
+			'      <div class="catdiff-section-title">Analysis progress</div>',
+			'      <div id="catdiff-progress-status">Ready to start analysis.</div>',
+			'      <div id="catdiff-progress-stages"></div>',
+			'    </div>',
 			'  </div>',
-			'  <div class="catdiff-section">',
-			'    <div class="catdiff-section-title">Current categories</div>',
-			'    <ul id="catdiff-current-cats"></ul>',
-			'  </div>',
-			'  <div class="catdiff-section">',
-			'    <div class="catdiff-section-title">Suggested categories</div>',
-			'    <ul id="catdiff-suggestions-list"></ul>',
-			'    <div id="catdiff-suggestion-count"></div>',
-			'  </div>',
-			'  <div class="catdiff-actions">',
-			'    <button class="catdiff-btn-accept">Accept</button>',
-			'    <button class="catdiff-btn-reject">Reject</button>',
+			'  <div id="catdiff-panel-file-view" style="display: none;">',
+			'    <img id="catdiff-panel-thumb" src="" alt="" />',
+			'    <div class="catdiff-section">',
+			'      <div class="catdiff-section-title">Description</div>',
+			'      <div id="catdiff-description"></div>',
+			'    </div>',
+			'    <div class="catdiff-section">',
+			'      <div class="catdiff-section-title">Current categories</div>',
+			'      <ul id="catdiff-current-cats"></ul>',
+			'    </div>',
+			'    <div class="catdiff-section">',
+			'      <div class="catdiff-section-title">Suggested categories</div>',
+			'      <ul id="catdiff-suggestions-list"></ul>',
+			'      <div id="catdiff-suggestion-count"></div>',
+			'    </div>',
+			'    <div class="catdiff-actions">',
+			'      <button class="catdiff-btn-accept">Accept</button>',
+			'      <button class="catdiff-btn-reject">Reject</button>',
+			'    </div>',
 			'  </div>',
 			'</div>'
 		].join( '\n' );
@@ -1137,12 +1123,24 @@
 		} );
 	}
 
+	function openAnalysisPanel() {
+		var $panel = $( '#catdiff-panel' );
+		$( '#catdiff-panel-title' ).text( 'Diffusor — ' + state.categoryTitle.replace( /^Category:/, '' ) );
+		$( '#catdiff-panel-analysis-view' ).show();
+		$( '#catdiff-panel-file-view' ).hide();
+		$panel.addClass( 'catdiff-panel-open' );
+		$( 'body' ).addClass( 'catdiff-panel-active' );
+		updatePanelProgress();
+	}
+
 	function openPanel( fileTitle ) {
 		state.currentFile = fileTitle;
 		var $panel = $( '#catdiff-panel' );
 
 		// Set title
 		$( '#catdiff-panel-title' ).text( fileTitle.replace( /^File:/, '' ) );
+		$( '#catdiff-panel-analysis-view' ).hide();
+		$( '#catdiff-panel-file-view' ).show();
 		$( '#catdiff-panel-thumb' ).attr( 'src', '' ).hide();
 		$( '#catdiff-description' ).text( 'Loading…' );
 		$( '#catdiff-current-cats' ).empty().append( '<li>Loading…</li>' );
@@ -1320,7 +1318,7 @@
 				}
 			}
 
-			// Remove the parent category being diffused
+			// Remove the parent category being diffused and remember where it was
 			var parentCat = state.categoryTitle.replace( /^Category:/, '' );
 			// Normalise underscores to spaces (wgPageName uses underscores, wikitext uses spaces)
 			parentCat = parentCat.replace( /_/g, ' ' );
@@ -1339,22 +1337,60 @@
 				'(?:\\s*\\|[^\\]]*)?\\s*\\]\\]', 'g'
 			);
 
-			// Debug logging
-			console.log( 'CategoryDiffusion: removing parent category' );
-			console.log( '  parentCat:', parentCat );
-			console.log( '  regex:', catRegex.toString() );
-			var matches = wikitext.match( catRegex );
-			console.log( '  matches found:', matches );
+			// Find all occurrences so we can both remove them and know where
+			// in the wikitext to insert the new categories.
+			var match;
+			var firstMatchStart = null;
+			var lastMatchEnd = null;
 
-			var beforeLen = wikitext.length;
-			wikitext = wikitext.replace( catRegex, '' );
-			console.log( '  chars removed:', beforeLen - wikitext.length );
-
-			// Append selected categories
-			var i, len;
-			for ( i = 0, len = selectedCats.length; i < len; i++ ) {
-				wikitext += '\n[[Category:' + selectedCats[ i ] + ']]';
+			while ( ( match = catRegex.exec( wikitext ) ) ) {
+				if ( firstMatchStart === null ) {
+					firstMatchStart = match.index;
+				}
+				lastMatchEnd = match.index + match[ 0 ].length;
 			}
+
+			if ( firstMatchStart === null ) {
+				// Parent category not found – fall back to appending at the end
+				var i, len;
+				for ( i = 0, len = selectedCats.length; i < len; i++ ) {
+					wikitext += '\n[[Category:' + selectedCats[ i ] + ']]';
+				}
+			} else {
+				// Remove all occurrences of the parent category and insert the
+				// new categories where the parent used to be.
+				var before = wikitext.slice( 0, firstMatchStart );
+				var after = wikitext.slice( lastMatchEnd );
+				var insertion = '';
+				var i, len;
+
+				for ( i = 0, len = selectedCats.length; i < len; i++ ) {
+					insertion += '\n[[Category:' + selectedCats[ i ] + ']]';
+				}
+
+				wikitext = before + insertion + after;
+			}
+
+			// Build a descriptive edit summary
+			var summaryParts = [];
+			if ( parentCat ) {
+				summaryParts.push( 'removed [[Category:' + parentCat + ']]' );
+			}
+			if ( selectedCats.length ) {
+				var addedCats = [];
+				var i, len;
+				for ( i = 0, len = selectedCats.length; i < len; i++ ) {
+					addedCats.push( '[[Category:' + selectedCats[ i ] + ']]' );
+				}
+				summaryParts.push( 'added ' + addedCats.join( ', ' ) );
+			}
+			var humanSummary;
+			if ( summaryParts.length ) {
+				humanSummary = 'Diffusor: ' + summaryParts.join( '; ' );
+			} else {
+				humanSummary = 'Diffusor: removed parent category';
+			}
+			var fullSummary = humanSummary + ' ([[User:Alaexis/Diffusor.js|Diffusor]])';
 
 			// Store for edit-page prefill
 			var storageKey = CONFIG.localStoragePrefix + 'prefill-' +
@@ -1367,11 +1403,28 @@
 
 			markAsReviewed( fileTitle );
 
-			var editUrl = mw.util.getUrl( fileTitle, {
-				action: 'edit',
-				summary: 'Categorised with [[User:Alaexis/Diffusor.js|Diffusor]]'
-			} );
-			window.open( editUrl, '_blank' );
+			// Either save via API (with optional tag) or open the edit form
+			// prefilled, depending on configuration.
+			if ( CONFIG.useApiEdit ) {
+				var editParams = {
+					action: 'edit',
+					title: fileTitle,
+					text: wikitext,
+					summary: fullSummary
+				};
+				api.postWithEditToken( editParams ).then( function () {
+					// Optionally, we could show a small confirmation, but for
+					// now just leave it silent.
+				}, function ( err ) {
+					mw.log.warn( 'CategoryDiffusion: API edit failed', err );
+				} );
+			} else {
+				var editUrl = mw.util.getUrl( fileTitle, {
+					action: 'edit',
+					summary: fullSummary
+				} );
+				window.open( editUrl, '_blank' );
+			}
 		} );
 	}
 
@@ -1381,7 +1434,50 @@
 			return;
 		}
 		markAsReviewed( fileTitle );
-		closePanel();
+		
+		// Move to the next unreviewed file with suggestions so users can
+		// quickly step through items on the page without the panel closing.
+		var $buttons = $( '.catdiff-suggest-btn' );
+		var i, len, idx = -1;
+
+		for ( i = 0, len = $buttons.length; i < len; i++ ) {
+			if ( $buttons.eq( i ).attr( 'data-file' ) === fileTitle ) {
+				idx = i;
+				break;
+			}
+		}
+
+		if ( idx === -1 ) {
+			closePanel();
+			return;
+		}
+
+		function openNextFrom( startIdx ) {
+			var j, jLen, $btn, nextTitle;
+			for ( j = startIdx, jLen = $buttons.length; j < jLen; j++ ) {
+				$btn = $buttons.eq( j );
+				nextTitle = $btn.attr( 'data-file' );
+				if ( !nextTitle ) {
+					continue;
+				}
+				if ( state.reviewedFiles[ nextTitle ] ) {
+					continue;
+				}
+				if ( !( state.suggestions[ nextTitle ] &&
+					state.suggestions[ nextTitle ].length ) ) {
+					continue;
+				}
+				openPanel( nextTitle );
+				return true;
+			}
+			return false;
+		}
+
+		// Try to move forward; if we reach the end, wrap around to the start.
+		if ( !openNextFrom( idx + 1 ) && !openNextFrom( 0 ) ) {
+			// No more suitable items – close the panel.
+			closePanel();
+		}
 	}
 
 	function markAsReviewed( fileTitle ) {
@@ -1392,8 +1488,6 @@
 			$.escapeSelector( fileTitle ) + '"]' );
 		$btn.addClass( 'catdiff-reviewed' );
 		$btn.closest( '.gallerybox' ).addClass( 'catdiff-gallery-reviewed' );
-
-		updateProgress();
 	}
 
 	// -----------------------------------------------------------------------
@@ -1446,14 +1540,12 @@
 
 		var hasCached = loadCachedSuggestions();
 
-		createAnalyseButton();
+		createToolsLink();
 		createPanel();
 		injectThumbnailButtons();
 
 		if ( hasCached ) {
-			updateAnalyseButton();
 			updateThumbnailButtons();
-			updateProgress();
 		}
 	}
 
