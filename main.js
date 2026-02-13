@@ -682,6 +682,47 @@
 	}
 
 	// -----------------------------------------------------------------------
+	// Wake Lock: prevent browser from freezing the tab during analysis
+	// -----------------------------------------------------------------------
+	var wakeLockSentinel = null;
+	var wakeLockActive = false;
+
+	function acquireWakeLock() {
+		wakeLockActive = true;
+		requestWakeLock();
+		// The Screen Wake Lock is released automatically when the tab becomes
+		// hidden. Re-acquire it when the tab becomes visible again so the
+		// analysis can keep running if the user switches away a second time.
+		document.addEventListener( 'visibilitychange', onVisibilityChange );
+	}
+
+	function requestWakeLock() {
+		if ( !wakeLockActive || !navigator.wakeLock ) {
+			return;
+		}
+		navigator.wakeLock.request( 'screen' ).then( function ( sentinel ) {
+			wakeLockSentinel = sentinel;
+		}, function () {
+			// Wake Lock denied (e.g. page not visible) – continue without it
+		} );
+	}
+
+	function onVisibilityChange() {
+		if ( document.visibilityState === 'visible' && wakeLockActive ) {
+			requestWakeLock();
+		}
+	}
+
+	function releaseWakeLock() {
+		wakeLockActive = false;
+		document.removeEventListener( 'visibilitychange', onVisibilityChange );
+		if ( wakeLockSentinel ) {
+			wakeLockSentinel.release();
+			wakeLockSentinel = null;
+		}
+	}
+
+	// -----------------------------------------------------------------------
 	// Analysis pipeline (runs entirely in-browser)
 	// -----------------------------------------------------------------------
 	function startAnalysis() {
@@ -694,6 +735,10 @@
 		state.subcategories = [];
 		state.fileMetadata = {};
 		state.analysisStatus = 'running';
+
+		// Acquire a Web Lock to prevent the browser from freezing this tab
+		// while the analysis is running in the background.
+		acquireWakeLock();
 		// Now that the analysis has been started explicitly by the user,
 		// (re)inject per-thumbnail buttons so they appear only after the
 		// script has been run at least once.
@@ -707,6 +752,7 @@
 			if ( subcatTitles.length === 0 ) {
 				state.analysisStatus = 'done';
 				state.suggestions = {};
+				releaseWakeLock();
 				updateStatus( 'No subcategories found.' );
 				updatePanelProgress( 'No subcategories found.' );
 				return;
@@ -730,6 +776,7 @@
 					state.analysisStatus = 'done';
 					state.suggestions = {};
 					saveCachedSuggestions();
+					releaseWakeLock();
 					updateStatus( 'No files found in category.' );
 					updatePanelProgress( 'No files found in category.' );
 					return;
@@ -749,6 +796,7 @@
 			} );
 		} ).fail( function ( err ) {
 			state.analysisStatus = 'error';
+			releaseWakeLock();
 			var errorMsg = 'Error: ' + ( err && err.message || err || 'Analysis failed.' );
 			updateStatus( errorMsg );
 			updatePanelProgress( errorMsg );
@@ -782,6 +830,7 @@
 
 				state.analysisStatus = 'done';
 				saveCachedSuggestions();
+				releaseWakeLock();
 				updateThumbnailButtons();
 				updatePanelProgress();
 				return $.Deferred().resolve().promise();
