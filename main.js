@@ -35,7 +35,7 @@
 
 		// LLM batching
 		filesPerBatch: 20,
-		maxFilesPerCategory: 500,
+		maxFilesPerCategory: 200,
 
 		// UI
 		panelWidth: '420px',
