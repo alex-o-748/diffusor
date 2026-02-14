@@ -495,7 +495,7 @@
 				'Fetching file metadata: batch ' + chunkIdx + '/' + chunks.length + '…'
 			);
 
-			return api.get( {
+			return api.post( {
 				action: 'query',
 				titles: chunk.join( '|' ),
 				prop: 'revisions|categories',
