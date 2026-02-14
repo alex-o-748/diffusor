@@ -474,28 +474,11 @@
 		var api = new mw.Api();
 		var result = {};
 		var chunks = [];
-		var i, chunk, titleLen;
+		var i;
 
-		// Split into chunks respecting both the 50-title API limit
-		// and a ~2000-byte URL length budget for titles to avoid HTTP 414
-		var maxTitlesPerChunk = 50;
-		var maxChunkBytes = 2000;
-
-		chunk = [];
-		titleLen = 0;
-		for ( i = 0; i < fileTitles.length; i++ ) {
-			var encodedLen = encodeURIComponent( fileTitles[ i ] ).length;
-			if ( chunk.length > 0 &&
-				( chunk.length >= maxTitlesPerChunk || titleLen + encodedLen + 3 > maxChunkBytes ) ) {
-				chunks.push( chunk );
-				chunk = [];
-				titleLen = 0;
-			}
-			chunk.push( fileTitles[ i ] );
-			titleLen += encodedLen + 3; // 3 for encoded '|' separator (%7C)
-		}
-		if ( chunk.length > 0 ) {
-			chunks.push( chunk );
+		// Split into chunks of 50 (MediaWiki API limit)
+		for ( i = 0; i < fileTitles.length; i += 50 ) {
+			chunks.push( fileTitles.slice( i, i + 50 ) );
 		}
 
 		var chunkIdx = 0;
@@ -505,7 +488,7 @@
 				return $.Deferred().resolve( result ).promise();
 			}
 
-			var currentChunk = chunks[ chunkIdx ];
+			var chunk = chunks[ chunkIdx ];
 			chunkIdx++;
 
 			updateStatus(
@@ -514,7 +497,7 @@
 
 			return api.post( {
 				action: 'query',
-				titles: currentChunk.join( '|' ),
+				titles: chunk.join( '|' ),
 				prop: 'revisions|categories',
 				rvprop: 'content',
 				rvslots: 'main',
