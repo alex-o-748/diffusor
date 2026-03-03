@@ -37,6 +37,10 @@
 		filesPerBatch: 20,
 		maxFilesPerCategory: 500,
 
+		// Caching
+		// How long to reuse the subcategory tree without re-crawling (ms)
+		treeCacheTtlMs: 60 * 60 * 1000, // 1 hour
+
 		// UI
 		panelWidth: '420px',
 		localStoragePrefix: 'catdiffusion-'
@@ -57,7 +61,8 @@
 		reviewedFiles: {},        // { "File:Foo.jpg": true, ... }
 		currentFile: null,        // file title currently shown in panel
 		subcategories: [],        // flat list of subcategory titles (without "Category:")
-		fileMetadata: {}          // { "File:Foo.jpg": { description, categories }, ... }
+		fileMetadata: {},         // { "File:Foo.jpg": { description, categories }, ... }
+		cachedAt: null            // timestamp (ms) when suggestions were cached, or null
 	};
 
 	// -----------------------------------------------------------------------
@@ -303,6 +308,7 @@
 				state.suggestions = parsed.suggestions || {};
 				state.subcategories = parsed.subcategories || [];
 				state.fileMetadata = parsed.fileMetadata || {};
+				state.cachedAt = parsed.timestamp || null;
 				state.analysisStatus = 'done';
 				return true;
 			}
@@ -319,12 +325,65 @@
 				JSON.stringify( {
 					suggestions: state.suggestions,
 					subcategories: state.subcategories,
-					fileMetadata: state.fileMetadata
+					fileMetadata: state.fileMetadata,
+					timestamp: Date.now()
 				} )
 			);
 		} catch ( e ) {
 			// ignore
 		}
+	}
+
+	function saveTreeCache( subcatTitles ) {
+		try {
+			localStorage.setItem(
+				getStorageKey( 'tree' ),
+				JSON.stringify( { subcategories: subcatTitles, timestamp: Date.now() } )
+			);
+		} catch ( e ) {
+			// ignore
+		}
+	}
+
+	function loadTreeCache() {
+		try {
+			var raw = localStorage.getItem( getStorageKey( 'tree' ) );
+			if ( raw ) {
+				var parsed = JSON.parse( raw );
+				var age = Date.now() - ( parsed.timestamp || 0 );
+				if ( age < CONFIG.treeCacheTtlMs &&
+						parsed.subcategories && parsed.subcategories.length ) {
+					return parsed;
+				}
+			}
+		} catch ( e ) {
+			// ignore
+		}
+		return null;
+	}
+
+	function formatRelativeTime( timestamp ) {
+		if ( !timestamp ) {
+			return '';
+		}
+		var minutes = Math.round( ( Date.now() - timestamp ) / 60000 );
+		if ( minutes < 1 ) { return 'just now'; }
+		if ( minutes === 1 ) { return '1 minute ago'; }
+		if ( minutes < 60 ) { return minutes + ' minutes ago'; }
+		var hours = Math.round( minutes / 60 );
+		if ( hours === 1 ) { return '1 hour ago'; }
+		if ( hours < 24 ) { return hours + ' hours ago'; }
+		var days = Math.round( hours / 24 );
+		return days === 1 ? '1 day ago' : days + ' days ago';
+	}
+
+	function rerunAnalysis() {
+		state.suggestions = {};
+		state.subcategories = [];
+		state.fileMetadata = {};
+		state.cachedAt = null;
+		state.analysisStatus = 'idle';
+		startAnalysis();
 	}
 
 	// -----------------------------------------------------------------------
@@ -725,8 +784,29 @@
 	// -----------------------------------------------------------------------
 	// Analysis pipeline (runs entirely in-browser)
 	// -----------------------------------------------------------------------
+	function fetchOrCachedTree() {
+		var treeCache = loadTreeCache();
+		if ( treeCache ) {
+			updateStatus( 'Using cached subcategory tree (' + treeCache.subcategories.length + ' subcategories). Fetching files…' );
+			return $.Deferred().resolve( treeCache.subcategories ).promise();
+		}
+		updateStatus( 'Crawling subcategory tree…' );
+		return crawlSubcategoryTree().then( function ( subcatTitles ) {
+			saveTreeCache( subcatTitles );
+			return subcatTitles;
+		} );
+	}
+
 	function startAnalysis() {
 		if ( state.analysisStatus === 'running' ) {
+			return;
+		}
+
+		// If we already have complete cached results, just show them
+		if ( state.analysisStatus === 'done' ) {
+			openAnalysisPanel();
+			injectThumbnailButtons();
+			updateThumbnailButtons();
 			return;
 		}
 
@@ -734,6 +814,7 @@
 		state.suggestions = {};
 		state.subcategories = [];
 		state.fileMetadata = {};
+		state.cachedAt = null;
 		state.analysisStatus = 'running';
 
 		// Acquire a Web Lock to prevent the browser from freezing this tab
@@ -745,10 +826,8 @@
 		injectThumbnailButtons();
 		updateThumbnailButtons();
 
-		// Step 1: Crawl subcategory tree
-		updateStatus( 'Crawling subcategory tree…' );
-
-		crawlSubcategoryTree().then( function ( subcatTitles ) {
+		// Step 1: Crawl subcategory tree (or use the 1-hour cache)
+		fetchOrCachedTree().then( function ( subcatTitles ) {
 			if ( subcatTitles.length === 0 ) {
 				state.analysisStatus = 'done';
 				state.suggestions = {};
@@ -959,22 +1038,28 @@
 			stages.push( { name: 'Fetching file metadata', status: 'done' } );
 			stages.push( { name: 'Analyzing with LLM', status: 'done' } );
 			
+			var cacheNote = state.cachedAt ?
+				' <span style="color: #72777d; font-size: 11px;">Cached ' + formatRelativeTime( state.cachedAt ) + '.</span>' :
+				'';
 			if ( withSuggestions > 0 ) {
 				$status.html(
-					'<strong style="color: #14866d;">✓ Analysis complete!</strong><br>' +
+					'<strong style="color: #14866d;">✓ Analysis complete!</strong>' + cacheNote + '<br>' +
 					withSuggestions + ' of ' + fileCount + ' files have suggestions.<br>' +
 					'Look for the green <b>View suggestions</b> buttons below each thumbnail.'
 				);
 			} else {
 				$status.html(
-					'<strong>Analysis complete.</strong><br>' +
+					'<strong>Analysis complete.</strong>' + cacheNote + '<br>' +
 					'No suggestions were generated for any file.'
 				);
 			}
+			$( '#catdiff-rerun' ).show();
 		} else if ( state.analysisStatus === 'error' ) {
+			$( '#catdiff-rerun' ).hide();
 			$status.html( '<strong style="color: #d33;">Error:</strong> ' + ( currentStatus || 'Analysis failed.' ) );
 			stages.push( { name: 'Crawling subcategory tree', status: 'error' } );
 		} else {
+			$( '#catdiff-rerun' ).hide();
 			$status.text( currentStatus || 'Ready to start analysis.' );
 		}
 
@@ -1129,6 +1214,7 @@
 			'      <div class="catdiff-section-title">Analysis progress</div>',
 			'      <div id="catdiff-progress-status">Ready to start analysis.</div>',
 			'      <div id="catdiff-progress-stages"></div>',
+			'      <button id="catdiff-rerun" style="display:none; margin-top: 8px;">Re-run analysis</button>',
 			'    </div>',
 			'  </div>',
 			'  <div id="catdiff-panel-file-view" style="display: none;">',
@@ -1169,6 +1255,11 @@
 		$( '.catdiff-btn-reject' ).on( 'click.catdiffusion', function ( e ) {
 			e.preventDefault();
 			rejectSuggestions();
+		} );
+
+		$( '#catdiff-rerun' ).on( 'click.catdiffusion', function ( e ) {
+			e.preventDefault();
+			rerunAnalysis();
 		} );
 	}
 
