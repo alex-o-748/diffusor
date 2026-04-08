@@ -37,6 +37,12 @@
 		filesPerBatch: 20,
 		maxFilesPerCategory: 500,
 
+		// Proposal pass (runs before classification to suggest new subcategories)
+		proposeNewCategories: true,
+		proposalMinFiles: 3,
+		proposalBatchSize: 150,
+		proposalMaxTokens: 4096,
+
 		// UI
 		panelWidth: '420px',
 		localStoragePrefix: 'catdiffusion-'
@@ -57,7 +63,11 @@
 		reviewedFiles: {},        // { "File:Foo.jpg": true, ... }
 		currentFile: null,        // file title currently shown in panel
 		subcategories: [],        // flat list of subcategory titles (without "Category:")
-		fileMetadata: {}          // { "File:Foo.jpg": { description, categories }, ... }
+		fileMetadata: {},         // { "File:Foo.jpg": { description, categories }, ... }
+		// Proposal pass (new-subcategory suggestions awaiting editor review)
+		proposals: [],            // [{name, files:[...], status:'pending'|'accepted'|'skipped', error?}]
+		rejectedProposals: {},    // { "normalizedname": true } — persisted across refreshes
+		phase: 'idle'             // idle | proposing | reviewing-proposals | classifying | done
 	};
 
 	// -----------------------------------------------------------------------
@@ -257,6 +267,149 @@
 			'  margin-top: 12px;',
 			'}',
 
+			/* Proposal review UI */
+			'#catdiff-proposals-help {',
+			'  font-size: 12px;',
+			'  color: #555;',
+			'  margin-bottom: 12px;',
+			'  line-height: 1.4;',
+			'}',
+			'#catdiff-proposals-list {',
+			'  list-style: none;',
+			'  padding: 0;',
+			'  margin: 4px 0;',
+			'}',
+			'#catdiff-proposals-list li {',
+			'  padding: 10px;',
+			'  margin: 8px 0;',
+			'  border: 1px solid #eaecf0;',
+			'  border-radius: 4px;',
+			'  background: #fff;',
+			'}',
+			'#catdiff-proposals-list li.catdiff-proposal-accepted {',
+			'  background: #e6f4ea;',
+			'  border-color: #b7dfc2;',
+			'}',
+			'#catdiff-proposals-list li.catdiff-proposal-skipped {',
+			'  opacity: 0.55;',
+			'}',
+			'#catdiff-proposals-list li.catdiff-proposal-skipped .catdiff-proposal-name {',
+			'  text-decoration: line-through;',
+			'}',
+			'#catdiff-proposals-list input.catdiff-proposal-name {',
+			'  width: 100%;',
+			'  padding: 4px 6px;',
+			'  font-size: 13px;',
+			'  font-weight: bold;',
+			'  box-sizing: border-box;',
+			'  border: 1px solid #c8ccd1;',
+			'  border-radius: 3px;',
+			'  margin-bottom: 6px;',
+			'}',
+			'.catdiff-proposal-count {',
+			'  display: inline-block;',
+			'  font-size: 11px;',
+			'  background: #eaecf0;',
+			'  color: #54595d;',
+			'  padding: 1px 8px;',
+			'  border-radius: 10px;',
+			'  margin-right: 6px;',
+			'}',
+			'.catdiff-proposal-files {',
+			'  margin: 6px 0;',
+			'  font-size: 12px;',
+			'}',
+			'.catdiff-proposal-files summary {',
+			'  cursor: pointer;',
+			'  color: #36c;',
+			'}',
+			'.catdiff-proposal-files ul {',
+			'  list-style: none;',
+			'  padding-left: 12px;',
+			'  margin: 4px 0;',
+			'  max-height: 160px;',
+			'  overflow-y: auto;',
+			'}',
+			'.catdiff-proposal-files li {',
+			'  padding: 2px 0 !important;',
+			'  border: none !important;',
+			'  margin: 0 !important;',
+			'  background: transparent !important;',
+			'}',
+			'.catdiff-prop-actions {',
+			'  display: flex;',
+			'  gap: 8px;',
+			'  margin-top: 8px;',
+			'}',
+			'.catdiff-btn-prop-accept {',
+			'  flex: 1;',
+			'  padding: 4px 10px;',
+			'  background: #14866d;',
+			'  color: #fff;',
+			'  border: none;',
+			'  border-radius: 3px;',
+			'  cursor: pointer;',
+			'  font-size: 12px;',
+			'  font-weight: bold;',
+			'}',
+			'.catdiff-btn-prop-accept:hover:not(:disabled) { background: #0d6b56; }',
+			'.catdiff-btn-prop-accept:disabled {',
+			'  background: #aaa;',
+			'  cursor: not-allowed;',
+			'}',
+			'.catdiff-btn-prop-skip {',
+			'  flex: 1;',
+			'  padding: 4px 10px;',
+			'  background: #fff;',
+			'  color: #555;',
+			'  border: 1px solid #a2a9b1;',
+			'  border-radius: 3px;',
+			'  cursor: pointer;',
+			'  font-size: 12px;',
+			'}',
+			'.catdiff-btn-prop-skip:hover:not(:disabled) { background: #f0f0f0; }',
+			'.catdiff-btn-prop-skip:disabled {',
+			'  cursor: not-allowed;',
+			'  color: #aaa;',
+			'}',
+			'.catdiff-prop-status {',
+			'  margin-top: 6px;',
+			'  font-size: 11px;',
+			'  min-height: 14px;',
+			'}',
+			'.catdiff-prop-status-ok { color: #14866d; }',
+			'.catdiff-prop-status-warn { color: #b58900; }',
+			'.catdiff-prop-status-error { color: #d33; }',
+			'#catdiff-proposals-status {',
+			'  font-size: 12px;',
+			'  margin: 8px 0;',
+			'  color: #555;',
+			'}',
+			'.catdiff-btn-proposals-continue {',
+			'  flex: 1;',
+			'  padding: 8px;',
+			'  background: #36c;',
+			'  color: #fff;',
+			'  font-weight: bold;',
+			'  border: none;',
+			'  border-radius: 4px;',
+			'  cursor: pointer;',
+			'  font-size: 13px;',
+			'}',
+			'.catdiff-btn-proposals-continue:hover { background: #2a4b8d; }',
+			'.catdiff-btn-proposals-skip-all {',
+			'  flex: 1;',
+			'  padding: 8px;',
+			'  background: #fff;',
+			'  color: #555;',
+			'  font-weight: bold;',
+			'  border: 1px solid #a2a9b1;',
+			'  border-radius: 4px;',
+			'  cursor: pointer;',
+			'  font-size: 13px;',
+			'}',
+			'.catdiff-btn-proposals-skip-all:hover { background: #f0f0f0; }',
+
 			/* Push content left when panel is open */
 			'body.catdiff-panel-active #mw-content-text {',
 			'  margin-right: ' + CONFIG.panelWidth + ';',
@@ -303,6 +456,9 @@
 				state.suggestions = parsed.suggestions || {};
 				state.subcategories = parsed.subcategories || [];
 				state.fileMetadata = parsed.fileMetadata || {};
+				state.proposals = parsed.proposals || [];
+				state.rejectedProposals = parsed.rejectedProposals || {};
+				state.phase = parsed.phase || 'done';
 				state.analysisStatus = 'done';
 				return true;
 			}
@@ -319,7 +475,10 @@
 				JSON.stringify( {
 					suggestions: state.suggestions,
 					subcategories: state.subcategories,
-					fileMetadata: state.fileMetadata
+					fileMetadata: state.fileMetadata,
+					proposals: state.proposals,
+					rejectedProposals: state.rejectedProposals,
+					phase: state.phase
 				} )
 			);
 		} catch ( e ) {
@@ -614,7 +773,7 @@
 			'Files:\n\n' + filesSection.join( '\n\n' );
 	}
 
-	function callLLM( prompt ) {
+	function callLLM( prompt, maxTokensOverride ) {
 		return $.ajax( {
 			url: CONFIG.llmProxyUrl,
 			method: 'POST',
@@ -622,7 +781,7 @@
 			data: JSON.stringify( {
 				model: CONFIG.llmModel,
 				messages: [ { role: 'user', content: prompt } ],
-				max_tokens: CONFIG.llmMaxTokens,
+				max_tokens: maxTokensOverride || CONFIG.llmMaxTokens,
 				temperature: CONFIG.llmTemperature
 			} ),
 			dataType: 'json',
@@ -682,6 +841,324 @@
 	}
 
 	// -----------------------------------------------------------------------
+	// Category name helpers (shared by proposal review + creation)
+	// -----------------------------------------------------------------------
+	function normalizeCategoryName( raw ) {
+		if ( raw === null || raw === undefined ) {
+			return '';
+		}
+		var name = String( raw );
+		// Strip optional leading "Category:" (case-insensitive, allow space after colon)
+		name = name.replace( /^\s*[Cc]ategory\s*:\s*/, '' );
+		// Underscores → spaces
+		name = name.replace( /_/g, ' ' );
+		// Collapse internal whitespace
+		name = name.replace( /\s+/g, ' ' ).trim();
+		if ( !name ) {
+			return '';
+		}
+		// Capitalize first character (MediaWiki normalises this)
+		return name.charAt( 0 ).toUpperCase() + name.slice( 1 );
+	}
+
+	function isValidCategoryName( name ) {
+		if ( !name ) {
+			return false;
+		}
+		if ( name.length > 240 ) {
+			return false;
+		}
+		// Reject wikitext / title-invalid characters
+		if ( /[\[\]{}|#<>\n]/.test( name ) ) {
+			return false;
+		}
+		if ( name.charAt( 0 ) === ':' ) {
+			return false;
+		}
+		return true;
+	}
+
+	function createNewCategory( name, parentName ) {
+		var deferred = $.Deferred();
+		var api = new mw.Api();
+		var wikitext = '[[Category:' + parentName + ']]\n';
+		var summary = 'Creating subcategory ([[User:Alaexis/Diffusor.js|Diffusor]])';
+
+		api.postWithEditToken( {
+			action: 'edit',
+			title: 'Category:' + name,
+			text: wikitext,
+			summary: summary,
+			createonly: 1,
+			format: 'json'
+		} ).then( function () {
+			deferred.resolve( { status: 'created', name: name, parent: parentName } );
+		}, function ( code, data ) {
+			// mw.Api reject signature: (code, data)
+			var info = '';
+			if ( data && data.error ) {
+				info = data.error.info || '';
+				if ( data.error.code === 'articleexists' ) {
+					deferred.resolve( { status: 'exists', name: name, parent: parentName } );
+					return;
+				}
+			}
+			deferred.reject( {
+				code: ( data && data.error && data.error.code ) || code || 'unknown',
+				info: info || String( code || 'Unknown error' )
+			} );
+		} );
+
+		return deferred.promise();
+	}
+
+	// -----------------------------------------------------------------------
+	// Proposal pass: LLM suggests new subcategories to create before diffusion
+	// -----------------------------------------------------------------------
+	function buildProposalPrompt( parentCat, existingSubcats, fileBatch ) {
+		var existing = existingSubcats.length
+			? existingSubcats.join( '\n' )
+			: '(none)';
+		var filesSection = [];
+		var i, len, f, name, desc, cats;
+		for ( i = 0, len = fileBatch.length; i < len; i++ ) {
+			f = fileBatch[ i ];
+			name = f.title.replace( /^File:/, '' );
+			desc = ( f.description || '' ).slice( 0, 200 );
+			if ( !desc ) {
+				desc = '(no description)';
+			}
+			cats = f.categories && f.categories.length
+				? f.categories.slice( 0, 5 ).join( ', ' )
+				: '(none)';
+			filesSection.push(
+				( i + 1 ) + '. ' + name + '\n' +
+				'   desc: ' + desc + '\n' +
+				'   cats: ' + cats
+			);
+		}
+
+		return 'You are helping categorize Wikimedia Commons files. The category ' +
+			'"' + parentCat + '" is overfull and needs to be diffused into subcategories.\n\n' +
+			'These subcategories already exist — do NOT propose any that duplicate these:\n' +
+			existing + '\n\n' +
+			'Below is a list of files in "' + parentCat + '". Identify clusters of ' +
+			CONFIG.proposalMinFiles + ' or more files that share a theme NOT covered by ' +
+			'the existing subcategories above. For each cluster, propose a new subcategory ' +
+			'name following Wikimedia Commons naming conventions (e.g. "Thing in Place", ' +
+			'"Thing of Place, Year", "Events in Location") and list the files that fit.\n\n' +
+			'IMPORTANT:\n' +
+			'- Propose only clusters of ' + CONFIG.proposalMinFiles + ' or more files.\n' +
+			'- Do NOT propose names that duplicate or closely paraphrase an existing subcategory above.\n' +
+			'- Use full filenames with "File:" prefix.\n\n' +
+			'Output ONLY valid JSON in this exact format:\n' +
+			'[{"name": "Proposed name", "files": ["File:a.jpg", "File:b.jpg", "File:c.jpg"]}]\n\n' +
+			'If no strong clusters exist, return [].\n\n' +
+			'Files:\n\n' + filesSection.join( '\n\n' );
+	}
+
+	function parseProposalResponse( responseText, fileTitleSet, existingSubcatsLowerSet ) {
+		// Extract JSON array (LLM may include markdown fences or prose)
+		var jsonMatch = responseText.match( /\[[\s\S]*\]/ );
+		if ( !jsonMatch ) {
+			mw.log.warn( 'CategoryDiffusion: no proposal JSON array in LLM response' );
+			return [];
+		}
+
+		var parsed;
+		try {
+			parsed = JSON.parse( jsonMatch[ 0 ] );
+		} catch ( e ) {
+			mw.log.warn( 'CategoryDiffusion: failed to parse proposal JSON', e );
+			return [];
+		}
+
+		if ( !$.isArray( parsed ) ) {
+			return [];
+		}
+
+		var result = [];
+		var i, len, entry, rawName, normName, lowerName, files, validatedFiles, j, jlen, fileTitle;
+
+		for ( i = 0, len = parsed.length; i < len; i++ ) {
+			entry = parsed[ i ];
+			if ( !entry || typeof entry !== 'object' ) {
+				continue;
+			}
+			rawName = entry.name;
+			files = entry.files;
+			if ( !rawName || !$.isArray( files ) ) {
+				continue;
+			}
+
+			normName = normalizeCategoryName( rawName );
+			if ( !isValidCategoryName( normName ) ) {
+				continue;
+			}
+			lowerName = normName.toLowerCase();
+
+			// Dedup against existing crawled subcats
+			if ( existingSubcatsLowerSet[ lowerName ] ) {
+				continue;
+			}
+			// Dedup against user-rejected proposals (so refresh doesn't resurface)
+			if ( state.rejectedProposals[ lowerName ] ) {
+				continue;
+			}
+
+			// Filter hallucinated files
+			validatedFiles = [];
+			for ( j = 0, jlen = files.length; j < jlen; j++ ) {
+				fileTitle = String( files[ j ] ).trim();
+				if ( fileTitle.indexOf( 'File:' ) !== 0 ) {
+					fileTitle = 'File:' + fileTitle;
+				}
+				if ( fileTitleSet[ fileTitle ] ) {
+					validatedFiles.push( fileTitle );
+				}
+			}
+
+			if ( validatedFiles.length < CONFIG.proposalMinFiles ) {
+				continue;
+			}
+
+			result.push( {
+				name: normName,
+				files: validatedFiles,
+				status: 'pending'
+			} );
+		}
+
+		return result;
+	}
+
+	function mergeProposalBatches( batches ) {
+		// Merge proposals from multiple batches by lowercased name; union files.
+		var byName = {};
+		var order = [];
+		var i, len, j, jlen, props, p, key, existing, k, klen, f;
+
+		for ( i = 0, len = batches.length; i < len; i++ ) {
+			props = batches[ i ];
+			for ( j = 0, jlen = props.length; j < jlen; j++ ) {
+				p = props[ j ];
+				key = p.name.toLowerCase();
+				if ( byName[ key ] ) {
+					existing = byName[ key ];
+					// Union files
+					for ( k = 0, klen = p.files.length; k < klen; k++ ) {
+						f = p.files[ k ];
+						if ( existing.files.indexOf( f ) === -1 ) {
+							existing.files.push( f );
+						}
+					}
+				} else {
+					byName[ key ] = {
+						name: p.name,
+						files: p.files.slice(),
+						status: 'pending'
+					};
+					order.push( key );
+				}
+			}
+		}
+
+		// Re-apply threshold after merge (a cluster may have only been below threshold per-batch)
+		var merged = [];
+		for ( i = 0, len = order.length; i < len; i++ ) {
+			if ( byName[ order[ i ] ].files.length >= CONFIG.proposalMinFiles ) {
+				merged.push( byName[ order[ i ] ] );
+			}
+		}
+		return merged;
+	}
+
+	function runProposalPass() {
+		var deferred = $.Deferred();
+		var metadata = state.fileMetadata;
+		var fileTitles = Object.keys( metadata );
+
+		if ( fileTitles.length === 0 ) {
+			deferred.resolve( [] );
+			return deferred.promise();
+		}
+
+		var fileTitleSet = {};
+		var i, len;
+		for ( i = 0, len = fileTitles.length; i < len; i++ ) {
+			fileTitleSet[ fileTitles[ i ] ] = true;
+		}
+
+		var existingSubcatsLowerSet = {};
+		for ( i = 0, len = state.subcategories.length; i < len; i++ ) {
+			existingSubcatsLowerSet[ state.subcategories[ i ].toLowerCase() ] = true;
+		}
+
+		// Build fileList for the prompt
+		var fileList = [];
+		for ( i = 0, len = fileTitles.length; i < len; i++ ) {
+			var title = fileTitles[ i ];
+			var meta = metadata[ title ] || {};
+			fileList.push( {
+				title: title,
+				description: meta.description || '',
+				categories: meta.categories || []
+			} );
+		}
+
+		// Split into batches
+		var batchSize = CONFIG.proposalBatchSize || 150;
+		var batches = [];
+		for ( i = 0, len = fileList.length; i < len; i += batchSize ) {
+			batches.push( fileList.slice( i, i + batchSize ) );
+		}
+
+		var parentCat = state.categoryTitle.replace( /^Category:/, '' ).replace( /_/g, ' ' );
+		var allBatchResults = [];
+		var batchIdx = 0;
+
+		function processBatch() {
+			if ( batchIdx >= batches.length ) {
+				deferred.resolve( mergeProposalBatches( allBatchResults ) );
+				return;
+			}
+
+			updateStatus(
+				'Proposing new subcategories (batch ' + ( batchIdx + 1 ) +
+				'/' + batches.length + ')…'
+			);
+			updatePanelProgress();
+
+			var prompt = buildProposalPrompt(
+				parentCat,
+				state.subcategories,
+				batches[ batchIdx ]
+			);
+
+			callLLM( prompt, CONFIG.proposalMaxTokens ).then( function ( responseText ) {
+				var parsed = parseProposalResponse(
+					responseText,
+					fileTitleSet,
+					existingSubcatsLowerSet
+				);
+				allBatchResults.push( parsed );
+				batchIdx++;
+				processBatch();
+			}, function ( err ) {
+				mw.log.warn( 'CategoryDiffusion: proposal batch failed', err );
+				// Record empty result and continue with next batch
+				allBatchResults.push( [] );
+				batchIdx++;
+				processBatch();
+			} );
+		}
+
+		processBatch();
+
+		return deferred.promise();
+	}
+
+	// -----------------------------------------------------------------------
 	// Wake Lock: prevent browser from freezing the tab during analysis
 	// -----------------------------------------------------------------------
 	var wakeLockSentinel = null;
@@ -734,7 +1211,11 @@
 		state.suggestions = {};
 		state.subcategories = [];
 		state.fileMetadata = {};
+		state.proposals = [];
+		state.phase = 'analyzing';
 		state.analysisStatus = 'running';
+		// Note: state.rejectedProposals is preserved across re-runs so an editor
+		// who previously skipped a proposal doesn't see it resurface on retry.
 
 		// Acquire a Web Lock to prevent the browser from freezing this tab
 		// while the analysis is running in the background.
@@ -751,6 +1232,7 @@
 		crawlSubcategoryTree().then( function ( subcatTitles ) {
 			if ( subcatTitles.length === 0 ) {
 				state.analysisStatus = 'done';
+				state.phase = 'done';
 				state.suggestions = {};
 				releaseWakeLock();
 				updateStatus( 'No subcategories found.' );
@@ -774,6 +1256,7 @@
 			return fetchCategoryFiles().then( function ( fileTitles ) {
 				if ( fileTitles.length === 0 ) {
 					state.analysisStatus = 'done';
+					state.phase = 'done';
 					state.suggestions = {};
 					saveCachedSuggestions();
 					releaseWakeLock();
@@ -790,12 +1273,35 @@
 				return fetchFileDescriptions( fileTitles ).then( function ( metadata ) {
 					state.fileMetadata = metadata;
 
-					// Step 4: Batch LLM calls
-					return runLLMBatches( subcatNames, metadata );
+					// Step 3.5: Proposal pass — suggest new subcategories
+					if ( !CONFIG.proposeNewCategories ) {
+						return runLLMBatches( state.subcategories, metadata );
+					}
+
+					updateStatus( 'Looking for new subcategory opportunities…' );
+					state.phase = 'proposing';
+					return runProposalPass().then( function ( proposals ) {
+						if ( !proposals.length ) {
+							state.phase = 'classifying';
+							return runLLMBatches( state.subcategories, metadata );
+						}
+						// Block on editor review before classification.
+						state.proposals = proposals;
+						state.phase = 'reviewing-proposals';
+						saveCachedSuggestions();
+						updateStatus(
+							proposals.length + ' new subcategor' +
+							( proposals.length === 1 ? 'y' : 'ies' ) +
+							' proposed. Review them in the panel →'
+						);
+						showProposalReviewUI();
+						// Keep wake lock active until user clicks Continue
+					} );
 				} );
 			} );
 		} ).fail( function ( err ) {
 			state.analysisStatus = 'error';
+			state.phase = 'idle';
 			releaseWakeLock();
 			var errorMsg = 'Error: ' + ( err && err.message || err || 'Analysis failed.' );
 			updateStatus( errorMsg );
@@ -816,19 +1322,45 @@
 			validCatsSet[ subcatNames[ i ] ] = true;
 		}
 
+		// Snapshot any pre-seeded suggestions (e.g. from accepted proposals)
+		// so they survive the allSuggestions overwrite at the end of the loop.
+		var preSeededSuggestions = {};
+		var psKey, psVal;
+		for ( psKey in state.suggestions ) {
+			if ( state.suggestions.hasOwnProperty( psKey ) ) {
+				psVal = state.suggestions[ psKey ];
+				if ( $.isArray( psVal ) && psVal.length ) {
+					preSeededSuggestions[ psKey ] = psVal.slice();
+				}
+			}
+		}
+
 		function processBatch() {
 			if ( batchIdx >= totalBatches ) {
-				// All batches done
-				state.suggestions = allSuggestions;
-
-				// Ensure every file has an entry
+				// All batches done — merge LLM results with any pre-seeded
+				// suggestions from accepted proposals.
+				var ft, seed, llmCats, merged, k, klen;
 				for ( i = 0, len = fileTitles.length; i < len; i++ ) {
-					if ( !allSuggestions[ fileTitles[ i ] ] ) {
-						allSuggestions[ fileTitles[ i ] ] = [];
+					ft = fileTitles[ i ];
+					if ( !allSuggestions[ ft ] ) {
+						allSuggestions[ ft ] = [];
+					}
+					seed = preSeededSuggestions[ ft ];
+					if ( seed && seed.length ) {
+						llmCats = allSuggestions[ ft ];
+						merged = llmCats.slice();
+						for ( k = 0, klen = seed.length; k < klen; k++ ) {
+							if ( merged.indexOf( seed[ k ] ) === -1 ) {
+								merged.push( seed[ k ] );
+							}
+						}
+						allSuggestions[ ft ] = merged;
 					}
 				}
 
+				state.suggestions = allSuggestions;
 				state.analysisStatus = 'done';
+				state.phase = 'done';
 				saveCachedSuggestions();
 				releaseWakeLock();
 				updateThumbnailButtons();
@@ -889,6 +1421,14 @@
 		if ( portletLink ) {
 			$( portletLink ).on( 'click.catdiffusion', function ( e ) {
 				e.preventDefault();
+				// If the editor was mid-review of proposals (e.g., after a page
+				// reload), resume the review UI instead of starting a fresh run
+				// which would wipe the cached proposals + metadata.
+				if ( state.phase === 'reviewing-proposals' &&
+					state.proposals.length > 0 ) {
+					showProposalReviewUI();
+					return;
+				}
 				openAnalysisPanel();
 				startAnalysis();
 			} );
@@ -1131,6 +1671,21 @@
 			'      <div id="catdiff-progress-stages"></div>',
 			'    </div>',
 			'  </div>',
+			'  <div id="catdiff-panel-proposals-view" style="display: none;">',
+			'    <div class="catdiff-section">',
+			'      <div class="catdiff-section-title">Proposed new subcategories</div>',
+			'      <div id="catdiff-proposals-help">',
+			'        Review and accept the new subcategories you want to create on Commons. ',
+			'        Accepted categories will be used when classifying files.',
+			'      </div>',
+			'      <ul id="catdiff-proposals-list"></ul>',
+			'      <div id="catdiff-proposals-status"></div>',
+			'      <div class="catdiff-actions">',
+			'        <button class="catdiff-btn-proposals-skip-all">Skip all</button>',
+			'        <button class="catdiff-btn-proposals-continue">Continue to file review →</button>',
+			'      </div>',
+			'    </div>',
+			'  </div>',
 			'  <div id="catdiff-panel-file-view" style="display: none;">',
 			'    <img id="catdiff-panel-thumb" src="" alt="" />',
 			'    <div class="catdiff-section">',
@@ -1161,22 +1716,65 @@
 			closePanel();
 		} );
 
-		$( '.catdiff-btn-accept' ).on( 'click.catdiffusion', function ( e ) {
-			e.preventDefault();
-			acceptSuggestions();
-		} );
+		// File-view Accept/Reject. Use descendant selectors so clicks inside
+		// the proposals view don't double-fire.
+		$( '#catdiff-panel-file-view .catdiff-btn-accept' )
+			.on( 'click.catdiffusion', function ( e ) {
+				e.preventDefault();
+				acceptSuggestions();
+			} );
 
-		$( '.catdiff-btn-reject' ).on( 'click.catdiffusion', function ( e ) {
-			e.preventDefault();
-			rejectSuggestions();
-		} );
+		$( '#catdiff-panel-file-view .catdiff-btn-reject' )
+			.on( 'click.catdiffusion', function ( e ) {
+				e.preventDefault();
+				rejectSuggestions();
+			} );
+
+		// Proposals-view bulk actions
+		$( '.catdiff-btn-proposals-skip-all' )
+			.on( 'click.catdiffusion', function ( e ) {
+				e.preventDefault();
+				handleSkipAllProposals();
+			} );
+
+		$( '.catdiff-btn-proposals-continue' )
+			.on( 'click.catdiffusion', function ( e ) {
+				e.preventDefault();
+				continueToClassification();
+			} );
+
+		// Per-proposal buttons — delegated
+		$( '#catdiff-proposals-list' ).on(
+			'click.catdiffusion',
+			'.catdiff-btn-prop-accept',
+			function ( e ) {
+				e.preventDefault();
+				var idx = parseInt( $( this ).closest( 'li' ).attr( 'data-idx' ), 10 );
+				handleProposalAccept( idx );
+			}
+		);
+
+		$( '#catdiff-proposals-list' ).on(
+			'click.catdiffusion',
+			'.catdiff-btn-prop-skip',
+			function ( e ) {
+				e.preventDefault();
+				var idx = parseInt( $( this ).closest( 'li' ).attr( 'data-idx' ), 10 );
+				handleProposalSkip( idx );
+			}
+		);
+	}
+
+	function showPanelView( viewName ) {
+		$( '#catdiff-panel-analysis-view' ).toggle( viewName === 'analysis' );
+		$( '#catdiff-panel-proposals-view' ).toggle( viewName === 'proposals' );
+		$( '#catdiff-panel-file-view' ).toggle( viewName === 'file' );
 	}
 
 	function openAnalysisPanel() {
 		var $panel = $( '#catdiff-panel' );
 		$( '#catdiff-panel-title' ).text( 'Diffusor — ' + state.categoryTitle.replace( /^Category:/, '' ) );
-		$( '#catdiff-panel-analysis-view' ).show();
-		$( '#catdiff-panel-file-view' ).hide();
+		showPanelView( 'analysis' );
 		$panel.addClass( 'catdiff-panel-open' );
 		$( 'body' ).addClass( 'catdiff-panel-active' );
 		updatePanelProgress();
@@ -1188,8 +1786,7 @@
 
 		// Set title
 		$( '#catdiff-panel-title' ).text( fileTitle.replace( /^File:/, '' ) );
-		$( '#catdiff-panel-analysis-view' ).hide();
-		$( '#catdiff-panel-file-view' ).show();
+		showPanelView( 'file' );
 		$( '#catdiff-panel-thumb' ).attr( 'src', '' ).hide();
 		$( '#catdiff-description' ).text( 'Loading…' );
 		$( '#catdiff-current-cats' ).empty().append( '<li>Loading…</li>' );
@@ -1212,6 +1809,298 @@
 		state.currentFile = null;
 		$( '#catdiff-panel' ).removeClass( 'catdiff-panel-open' );
 		$( 'body' ).removeClass( 'catdiff-panel-active' );
+	}
+
+	// -----------------------------------------------------------------------
+	// UI: Proposal review
+	// -----------------------------------------------------------------------
+	function showProposalReviewUI() {
+		var $panel = $( '#catdiff-panel' );
+		$( '#catdiff-panel-title' ).text(
+			'Diffusor — ' + state.categoryTitle.replace( /^Category:/, '' )
+		);
+		showPanelView( 'proposals' );
+		$panel.addClass( 'catdiff-panel-open' );
+		$( 'body' ).addClass( 'catdiff-panel-active' );
+		renderProposals();
+	}
+
+	function renderProposals() {
+		var $list = $( '#catdiff-proposals-list' ).empty();
+		var $status = $( '#catdiff-proposals-status' ).empty();
+
+		if ( !state.proposals.length ) {
+			$list.append( '<li>No proposals to review.</li>' );
+			return;
+		}
+
+		var i, len, p, $li, $nameInput, $countBadge, $filesDetails, $filesSummary,
+			$filesList, j, jlen, $fileLi, $fileLink, fileName, $actions,
+			$acceptBtn, $skipBtn, $statusSpan;
+
+		for ( i = 0, len = state.proposals.length; i < len; i++ ) {
+			p = state.proposals[ i ];
+			$li = $( '<li>' ).attr( 'data-idx', i );
+
+			if ( p.status === 'accepted' ) {
+				$li.addClass( 'catdiff-proposal-accepted' );
+			} else if ( p.status === 'skipped' ) {
+				$li.addClass( 'catdiff-proposal-skipped' );
+			}
+
+			$nameInput = $( '<input>' )
+				.attr( 'type', 'text' )
+				.addClass( 'catdiff-proposal-name' )
+				.val( p.name );
+
+			if ( p.status !== 'pending' ) {
+				$nameInput.prop( 'disabled', true );
+			}
+
+			$countBadge = $( '<span>' )
+				.addClass( 'catdiff-proposal-count' )
+				.text( p.files.length + ' files' );
+
+			$filesDetails = $( '<details>' ).addClass( 'catdiff-proposal-files' );
+			$filesSummary = $( '<summary>' ).text( 'Show files' );
+			$filesList = $( '<ul>' );
+			for ( j = 0, jlen = p.files.length; j < jlen; j++ ) {
+				fileName = p.files[ j ];
+				$fileLink = $( '<a>' )
+					.attr( 'href', mw.util.getUrl( fileName ) )
+					.attr( 'target', '_blank' )
+					.text( fileName.replace( /^File:/, '' ) );
+				$fileLi = $( '<li>' ).append( $fileLink );
+				$filesList.append( $fileLi );
+			}
+			$filesDetails.append( $filesSummary, $filesList );
+
+			$acceptBtn = $( '<button>' )
+				.attr( 'type', 'button' )
+				.addClass( 'catdiff-btn-prop-accept' )
+				.text( 'Accept' );
+			$skipBtn = $( '<button>' )
+				.attr( 'type', 'button' )
+				.addClass( 'catdiff-btn-prop-skip' )
+				.text( 'Skip' );
+
+			if ( p.status !== 'pending' ) {
+				$acceptBtn.prop( 'disabled', true );
+				$skipBtn.prop( 'disabled', true );
+			}
+
+			$actions = $( '<div>' )
+				.addClass( 'catdiff-prop-actions' )
+				.append( $acceptBtn, $skipBtn );
+
+			$statusSpan = $( '<div>' ).addClass( 'catdiff-prop-status' );
+			if ( p.status === 'accepted' ) {
+				$statusSpan.addClass( 'catdiff-prop-status-ok' ).text( '✓ Accepted' );
+			} else if ( p.status === 'skipped' ) {
+				$statusSpan.text( 'Skipped' );
+			} else if ( p.error ) {
+				$statusSpan.addClass( 'catdiff-prop-status-error' ).text( p.error );
+			}
+
+			$li.append( $nameInput, $countBadge, $filesDetails, $actions, $statusSpan );
+			$list.append( $li );
+		}
+	}
+
+	function setProposalStatusText( idx, text, cls ) {
+		var $li = $( '#catdiff-proposals-list li[data-idx="' + idx + '"]' );
+		var $status = $li.find( '.catdiff-prop-status' );
+		$status
+			.removeClass( 'catdiff-prop-status-ok catdiff-prop-status-warn catdiff-prop-status-error' )
+			.text( text );
+		if ( cls ) {
+			$status.addClass( cls );
+		}
+	}
+
+	function setProposalRowDisabled( idx, disabled ) {
+		var $li = $( '#catdiff-proposals-list li[data-idx="' + idx + '"]' );
+		$li.find( '.catdiff-btn-prop-accept, .catdiff-btn-prop-skip' )
+			.prop( 'disabled', disabled );
+		$li.find( '.catdiff-proposal-name' ).prop( 'disabled', disabled );
+	}
+
+	function handleProposalAccept( idx ) {
+		var p = state.proposals[ idx ];
+		if ( !p || p.status !== 'pending' ) {
+			return;
+		}
+		var $li = $( '#catdiff-proposals-list li[data-idx="' + idx + '"]' );
+		var rawName = $li.find( '.catdiff-proposal-name' ).val();
+		var name = normalizeCategoryName( rawName );
+
+		if ( !isValidCategoryName( name ) ) {
+			setProposalStatusText( idx, 'Invalid category name.', 'catdiff-prop-status-error' );
+			return;
+		}
+
+		var parent = state.categoryTitle.replace( /^Category:/, '' ).replace( /_/g, ' ' );
+		if ( name.toLowerCase() === parent.toLowerCase() ) {
+			setProposalStatusText(
+				idx,
+				'Cannot create a category as a child of itself.',
+				'catdiff-prop-status-error'
+			);
+			return;
+		}
+
+		// Dedup against existing crawled subcats
+		var lowerName = name.toLowerCase();
+		var i, len;
+		for ( i = 0, len = state.subcategories.length; i < len; i++ ) {
+			if ( state.subcategories[ i ].toLowerCase() === lowerName ) {
+				// Reuse existing subcat — don't create, just accept
+				p.name = state.subcategories[ i ];
+				p.status = 'accepted';
+				delete p.error;
+				saveCachedSuggestions();
+				$li.addClass( 'catdiff-proposal-accepted' );
+				setProposalRowDisabled( idx, true );
+				setProposalStatusText(
+					idx,
+					'✓ Reusing existing subcategory',
+					'catdiff-prop-status-warn'
+				);
+				return;
+			}
+		}
+
+		// Dedup against other already-accepted proposals in this batch
+		for ( i = 0, len = state.proposals.length; i < len; i++ ) {
+			if ( i === idx ) {
+				continue;
+			}
+			if ( state.proposals[ i ].status === 'accepted' &&
+				state.proposals[ i ].name.toLowerCase() === lowerName ) {
+				setProposalStatusText(
+					idx,
+					'Duplicates another accepted proposal.',
+					'catdiff-prop-status-error'
+				);
+				return;
+			}
+		}
+
+		// Proceed with API creation
+		setProposalRowDisabled( idx, true );
+		setProposalStatusText( idx, 'Creating Category:' + name + '…', null );
+
+		createNewCategory( name, parent ).then( function ( result ) {
+			p.name = name;
+			p.status = 'accepted';
+			delete p.error;
+			saveCachedSuggestions();
+			$li.addClass( 'catdiff-proposal-accepted' );
+			if ( result.status === 'exists' ) {
+				setProposalStatusText(
+					idx,
+					'✓ Already exists on Commons — reusing it',
+					'catdiff-prop-status-warn'
+				);
+			} else {
+				setProposalStatusText(
+					idx,
+					'✓ Created Category:' + name,
+					'catdiff-prop-status-ok'
+				);
+			}
+		}, function ( err ) {
+			p.error = err.info || err.code || 'Unknown error';
+			saveCachedSuggestions();
+			setProposalRowDisabled( idx, false );
+			setProposalStatusText(
+				idx,
+				'Error: ' + p.error,
+				'catdiff-prop-status-error'
+			);
+		} );
+	}
+
+	function handleProposalSkip( idx ) {
+		var p = state.proposals[ idx ];
+		if ( !p || p.status !== 'pending' ) {
+			return;
+		}
+		p.status = 'skipped';
+		state.rejectedProposals[ p.name.toLowerCase() ] = true;
+		saveCachedSuggestions();
+
+		var $li = $( '#catdiff-proposals-list li[data-idx="' + idx + '"]' );
+		$li.addClass( 'catdiff-proposal-skipped' );
+		setProposalRowDisabled( idx, true );
+		setProposalStatusText( idx, 'Skipped', null );
+	}
+
+	function handleSkipAllProposals() {
+		var i, len;
+		for ( i = 0, len = state.proposals.length; i < len; i++ ) {
+			if ( state.proposals[ i ].status === 'pending' ) {
+				handleProposalSkip( i );
+			}
+		}
+	}
+
+	function continueToClassification() {
+		// Treat any still-pending proposals as skipped before proceeding.
+		var i, len, j, jlen, p, name, fileTitle, existing;
+
+		for ( i = 0, len = state.proposals.length; i < len; i++ ) {
+			if ( state.proposals[ i ].status === 'pending' ) {
+				state.proposals[ i ].status = 'skipped';
+				state.rejectedProposals[ state.proposals[ i ].name.toLowerCase() ] = true;
+			}
+		}
+
+		// Merge accepted proposals into state.subcategories and pre-seed suggestions
+		for ( i = 0, len = state.proposals.length; i < len; i++ ) {
+			p = state.proposals[ i ];
+			if ( p.status !== 'accepted' ) {
+				continue;
+			}
+			name = p.name;
+
+			// Add to subcategories if not already present (case-insensitive)
+			var alreadyPresent = false;
+			for ( j = 0, jlen = state.subcategories.length; j < jlen; j++ ) {
+				if ( state.subcategories[ j ].toLowerCase() === name.toLowerCase() ) {
+					alreadyPresent = true;
+					break;
+				}
+			}
+			if ( !alreadyPresent ) {
+				state.subcategories.push( name );
+			}
+
+			// Pre-seed suggestions for the cluster files
+			for ( j = 0, jlen = p.files.length; j < jlen; j++ ) {
+				fileTitle = p.files[ j ];
+				if ( !state.fileMetadata[ fileTitle ] ) {
+					continue;
+				}
+				existing = state.suggestions[ fileTitle ] || [];
+				if ( existing.indexOf( name ) === -1 ) {
+					existing.push( name );
+				}
+				state.suggestions[ fileTitle ] = existing;
+			}
+		}
+
+		// Clear proposals (review complete)
+		state.proposals = [];
+		state.phase = 'classifying';
+		saveCachedSuggestions();
+
+		// Transition UI back to analysis view and resume classification
+		showPanelView( 'analysis' );
+		updateStatus( 'Starting file classification…' );
+		updatePanelProgress();
+
+		runLLMBatches( state.subcategories, state.fileMetadata );
 	}
 
 	function fetchThumbnail( fileTitle ) {
@@ -1595,6 +2484,11 @@
 
 		if ( hasCached ) {
 			updateThumbnailButtons();
+			// If the editor was mid-review of proposals, restore that view on reload
+			// so they can finish accepting/skipping before classification.
+			if ( state.phase === 'reviewing-proposals' && state.proposals.length > 0 ) {
+				showProposalReviewUI();
+			}
 		}
 	}
 
