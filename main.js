@@ -23,12 +23,6 @@
 		llmMaxTokens: 2048,
 		llmTemperature: 0.1,
 
-		// Editing
-		// If true, saves edits via the API (with an optional tag) instead of
-		// just opening the edit form. By default this is false so users always
-		// review the diff manually.
-		useApiEdit: false,
-
 		// Subcategory tree crawl limits
 		maxTreeDepth: 5,
 		maxTreeNodes: 2000,
@@ -239,6 +233,18 @@
 			'  font-size: 13px;',
 			'}',
 			'.catdiff-btn-reject:hover { background: #f0f0f0; }',
+			'.catdiff-btn-review {',
+			'  flex: 1;',
+			'  padding: 8px;',
+			'  background: #fff;',
+			'  color: #36c;',
+			'  font-weight: bold;',
+			'  border: 1px solid #36c;',
+			'  border-radius: 4px;',
+			'  cursor: pointer;',
+			'  font-size: 13px;',
+			'}',
+			'.catdiff-btn-review:hover { background: #eaf3ff; }',
 
 			/* Loading spinner */
 			'.catdiff-loading {',
@@ -1148,6 +1154,7 @@
 			'    </div>',
 			'    <div class="catdiff-actions">',
 			'      <button class="catdiff-btn-accept">Accept</button>',
+			'      <button class="catdiff-btn-review" title="Opens the wikitext edit page in a new tab with the changes prefilled">Review in editor</button>',
 			'      <button class="catdiff-btn-reject">Reject</button>',
 			'    </div>',
 			'  </div>',
@@ -1164,6 +1171,11 @@
 		$( '.catdiff-btn-accept' ).on( 'click.catdiffusion', function ( e ) {
 			e.preventDefault();
 			acceptSuggestions();
+		} );
+
+		$( '.catdiff-btn-review' ).on( 'click.catdiffusion', function ( e ) {
+			e.preventDefault();
+			openSuggestionsInEditor();
 		} );
 
 		$( '.catdiff-btn-reject' ).on( 'click.catdiffusion', function ( e ) {
@@ -1316,11 +1328,12 @@
 			newCount + ' new'
 		);
 
-		// Update Accept button label based on whether there are new categories
-		var acceptLabel = newCount > 0
-			? 'Accept'
-			: 'Remove parent category';
-		$( '.catdiff-btn-accept' ).text( acceptLabel );
+		// Update Accept and Review-in-editor button labels based on whether
+		// there are new categories. Both buttons relabel in lockstep so the
+		// "remove parent only" path reads coherently across both actions.
+		var hasNew = newCount > 0;
+		$( '.catdiff-btn-accept' ).text( hasNew ? 'Accept' : 'Remove parent category' );
+		$( '.catdiff-btn-review' ).text( hasNew ? 'Review in editor' : 'Review removal in editor' );
 	}
 
 	function getSelectedCategories() {
@@ -1335,17 +1348,20 @@
 	// -----------------------------------------------------------------------
 	// Actions: Accept / Reject
 	// -----------------------------------------------------------------------
-	function acceptSuggestions() {
+	// Fetch the current wikitext for state.currentFile and compute the new
+	// wikitext + edit summary that reflects the selected suggestions. Shared
+	// by acceptSuggestions() (API save) and openSuggestionsInEditor() (manual
+	// review). Returns a Promise of { api, fileTitle, wikitext, summary }.
+	function prepareEdit() {
 		var fileTitle = state.currentFile;
 		if ( !fileTitle ) {
-			return;
+			return $.Deferred().reject( 'no-current-file' ).promise();
 		}
 
 		var selectedCats = getSelectedCategories();
-
 		var api = new mw.Api();
 
-		api.get( {
+		return api.get( {
 			action: 'query',
 			titles: fileTitle,
 			prop: 'revisions',
@@ -1441,39 +1457,55 @@
 			}
 			var fullSummary = humanSummary + ' ([[User:Alaexis/Diffusor.js|Diffusor]])';
 
-			// Store for edit-page prefill
+			return {
+				api: api,
+				fileTitle: fileTitle,
+				wikitext: wikitext,
+				summary: fullSummary
+			};
+		} );
+	}
+
+	function acceptSuggestions() {
+		prepareEdit().then( function ( prep ) {
+			prep.api.postWithEditToken( {
+				action: 'edit',
+				title: prep.fileTitle,
+				text: prep.wikitext,
+				summary: prep.summary
+			} ).then( function () {
+				markAsReviewed( prep.fileTitle );
+				mw.notify( 'Saved categories on ' + prep.fileTitle, { type: 'success' } );
+			}, function ( err ) {
+				mw.log.warn( 'CategoryDiffusion: API edit failed', err );
+				var detail = ( err && err.error && err.error.info ) || err || 'unknown error';
+				mw.notify( 'Failed to save ' + prep.fileTitle + ': ' + detail, {
+					type: 'error',
+					autoHide: false
+				} );
+			} );
+		} );
+	}
+
+	function openSuggestionsInEditor() {
+		prepareEdit().then( function ( prep ) {
+			// Stash the prepared wikitext for checkEditPagePrefill() to read
+			// when the edit tab loads.
 			var storageKey = CONFIG.localStoragePrefix + 'prefill-' +
-				fileTitle.replace( / /g, '_' );
+				prep.fileTitle.replace( / /g, '_' );
 			try {
-				sessionStorage.setItem( storageKey, wikitext );
+				sessionStorage.setItem( storageKey, prep.wikitext );
 			} catch ( e ) {
 				// sessionStorage unavailable
 			}
 
-			markAsReviewed( fileTitle );
+			markAsReviewed( prep.fileTitle );
 
-			// Either save via API (with optional tag) or open the edit form
-			// prefilled, depending on configuration.
-			if ( CONFIG.useApiEdit ) {
-				var editParams = {
-					action: 'edit',
-					title: fileTitle,
-					text: wikitext,
-					summary: fullSummary
-				};
-				api.postWithEditToken( editParams ).then( function () {
-					// Optionally, we could show a small confirmation, but for
-					// now just leave it silent.
-				}, function ( err ) {
-					mw.log.warn( 'CategoryDiffusion: API edit failed', err );
-				} );
-			} else {
-				var editUrl = mw.util.getUrl( fileTitle, {
-					action: 'edit',
-					summary: fullSummary
-				} );
-				window.open( editUrl, '_blank' );
-			}
+			var editUrl = mw.util.getUrl( prep.fileTitle, {
+				action: 'edit',
+				summary: prep.summary
+			} );
+			window.open( editUrl, '_blank' );
 		} );
 	}
 
