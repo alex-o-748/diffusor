@@ -18,8 +18,8 @@
 	// -----------------------------------------------------------------------
 	var CONFIG = {
 		// URL of your Cloudflare Worker that proxies LLM requests
-		llmProxyUrl: 'https://publicai-proxy.alaexis.workers.dev',
-		llmModel: 'aisingapore/Qwen-SEA-LION-v4-32B-IT',
+		llmProxyUrl: 'https://publicai-proxy.alaexis.workers.dev/hf',
+		llmModel: 'openai/gpt-oss-20b',
 		llmMaxTokens: 2048,
 		llmTemperature: 0.1,
 
