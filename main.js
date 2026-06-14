@@ -627,13 +627,17 @@
 			contentType: 'application/json',
 			data: JSON.stringify( {
 				model: CONFIG.llmModel,
-				messages: [ { role: 'user', content: prompt } ],
+				messages: [
+					{ role: 'system', content: 'You are a JSON API. Respond with ONLY valid JSON, no explanations, no markdown fences, no thinking.' },
+					{ role: 'user', content: prompt }
+				],
 				max_tokens: CONFIG.llmMaxTokens,
 				temperature: CONFIG.llmTemperature
 			} ),
 			dataType: 'json',
 			timeout: 120000
 		} ).then( function ( data ) {
+			console.log( 'CategoryDiffusion: raw LLM response', data );
 			if ( data.choices && data.choices[ 0 ] ) {
 				return data.choices[ 0 ].message.content || '';
 			}
@@ -642,8 +646,13 @@
 	}
 
 	function parseLLMResponse( responseText, validCatsSet ) {
-		// Extract JSON from response (LLM may include markdown fences)
-		var jsonMatch = responseText.match( /\{[\s\S]*\}/ );
+		// Strip thinking tags and markdown fences before extracting JSON
+		var cleaned = responseText
+			.replace( /<think>[\s\S]*?<\/think>/gi, '' )
+			.replace( /```(?:json)?\s*/gi, '' )
+			.replace( /```\s*/g, '' )
+			.trim();
+		var jsonMatch = cleaned.match( /\{[\s\S]*\}/ );
 		if ( !jsonMatch ) {
 			mw.log.warn( 'CategoryDiffusion: no JSON in LLM response' );
 			return {};
