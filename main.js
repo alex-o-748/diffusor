@@ -637,6 +637,7 @@
 			dataType: 'json',
 			timeout: 120000
 		} ).then( function ( data ) {
+			console.log( 'CategoryDiffusion: raw LLM response', data );
 			if ( data.choices && data.choices[ 0 ] ) {
 				return data.choices[ 0 ].message.content || '';
 			}
