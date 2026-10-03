@@ -56,6 +56,7 @@
 		currentFile: null,        // file title currently shown in panel
 		subcategories: [],        // flat list of subcategory titles (without "Category:")
 		fileMetadata: {},         // { "File:Foo.jpg": { description, categories }, ... }
+		customCategories: [],     // categories the user added by hand, offered for every file
 		failedBatches: 0,         // LLM batches that returned no usable JSON
 		totalBatches: 0
 	};
@@ -197,9 +198,74 @@
 			'#catdiff-suggestions-list label {',
 			'  cursor: pointer;',
 			'}',
-			'#catdiff-suggestions-list label.catdiff-already-present {',
+			'#catdiff-suggestions-list label.catdiff-already-present,',
+			'#catdiff-custom-list label.catdiff-already-present {',
 			'  color: #999;',
 			'  text-decoration: line-through;',
+			'}',
+
+			/* User-added categories */
+			'#catdiff-custom-list {',
+			'  list-style: none;',
+			'  padding: 0;',
+			'  margin: 4px 0;',
+			'}',
+			'#catdiff-custom-list li {',
+			'  padding: 3px 0;',
+			'}',
+			'#catdiff-custom-list label {',
+			'  cursor: pointer;',
+			'}',
+			'#catdiff-custom-list li.catdiff-custom-hint {',
+			'  font-size: 11px;',
+			'  color: #72777d;',
+			'}',
+			'.catdiff-custom-remove {',
+			'  background: none;',
+			'  border: none;',
+			'  color: #999;',
+			'  cursor: pointer;',
+			'  font-size: 14px;',
+			'  padding: 0 4px;',
+			'}',
+			'.catdiff-custom-remove:hover { color: #d33; }',
+			'#catdiff-custom-form {',
+			'  display: flex;',
+			'  gap: 6px;',
+			'  margin-top: 6px;',
+			'}',
+			'#catdiff-custom-input {',
+			'  flex: 1;',
+			'  min-width: 0;',
+			'  padding: 4px 6px;',
+			'  font-size: 13px;',
+			'  border: 1px solid #a2a9b1;',
+			'  border-radius: 3px;',
+			'}',
+			'#catdiff-custom-add {',
+			'  padding: 4px 12px;',
+			'  background: #fff;',
+			'  color: #36c;',
+			'  font-weight: bold;',
+			'  border: 1px solid #36c;',
+			'  border-radius: 3px;',
+			'  cursor: pointer;',
+			'  font-size: 13px;',
+			'}',
+			'#catdiff-custom-add:hover { background: #eaf3ff; }',
+			'#catdiff-custom-add:disabled {',
+			'  color: #72777d;',
+			'  border-color: #c8ccd1;',
+			'  background: #fff;',
+			'  cursor: default;',
+			'}',
+			'#catdiff-custom-status {',
+			'  font-size: 11px;',
+			'  color: #72777d;',
+			'  margin-top: 4px;',
+			'}',
+			'#catdiff-custom-status.catdiff-error {',
+			'  color: #d33;',
 			'}',
 
 			/* Suggestion count */
@@ -338,6 +404,28 @@
 					subcategories: state.subcategories,
 					fileMetadata: state.fileMetadata
 				} )
+			);
+		} catch ( e ) {
+			// ignore
+		}
+	}
+
+	function loadCustomCategories() {
+		try {
+			var raw = localStorage.getItem( getStorageKey( 'custom' ) );
+			if ( raw ) {
+				state.customCategories = JSON.parse( raw ) || [];
+			}
+		} catch ( e ) {
+			state.customCategories = [];
+		}
+	}
+
+	function saveCustomCategories() {
+		try {
+			localStorage.setItem(
+				getStorageKey( 'custom' ),
+				JSON.stringify( state.customCategories )
 			);
 		} catch ( e ) {
 			// ignore
@@ -1079,6 +1167,21 @@
 	// -----------------------------------------------------------------------
 	// UI: Per-thumbnail suggest buttons
 	// -----------------------------------------------------------------------
+	function hasSuggestions( fileTitle ) {
+		return !!( state.suggestions[ fileTitle ] &&
+			state.suggestions[ fileTitle ].length );
+	}
+
+	// Once the user has added categories of their own, every analysed file
+	// can be opened so those categories can be applied to it, not just the
+	// files the LLM had suggestions for.
+	function canOpenFile( fileTitle ) {
+		if ( state.analysisStatus !== 'done' || !state.fileMetadata[ fileTitle ] ) {
+			return false;
+		}
+		return hasSuggestions( fileTitle ) || state.customCategories.length > 0;
+	}
+
 	function injectThumbnailButtons() {
 		// Hide per-thumbnail buttons until the script has actually been run
 		// (or cached results are available). This avoids showing disabled
@@ -1111,17 +1214,14 @@
 				.addClass( 'catdiff-suggest-btn' )
 				.attr( 'data-file', fileTitle )
 				.text( 'View suggestions' )
-				.prop( 'disabled', state.analysisStatus !== 'done' ||
-					!( state.suggestions[ fileTitle ] &&
-						state.suggestions[ fileTitle ].length ) );
+				.prop( 'disabled', !canOpenFile( fileTitle ) );
 
 			if ( state.reviewedFiles[ fileTitle ] ) {
 				$btn.addClass( 'catdiff-reviewed' );
 				$item.addClass( 'catdiff-gallery-reviewed' );
 			}
 
-			if ( state.suggestions[ fileTitle ] &&
-				state.suggestions[ fileTitle ].length ) {
+			if ( hasSuggestions( fileTitle ) ) {
 				$btn.addClass( 'catdiff-has-suggestions' );
 			}
 
@@ -1158,23 +1258,19 @@
 
 	function updateThumbnailButtons() {
 		var $buttons = $( '.catdiff-suggest-btn' );
-		var isReady = state.analysisStatus === 'done';
-		var i, len, $btn, fileTitle, hasSuggestions;
+		var i, len, $btn, fileTitle;
 
 		for ( i = 0, len = $buttons.length; i < len; i++ ) {
 			$btn = $buttons.eq( i );
 			fileTitle = $btn.attr( 'data-file' );
-			hasSuggestions = state.suggestions[ fileTitle ] &&
-				state.suggestions[ fileTitle ].length;
 
-			// Disable if analysis not done OR no suggestions for this file
-			$btn.prop( 'disabled', !isReady || !hasSuggestions );
+			$btn.prop( 'disabled', !canOpenFile( fileTitle ) );
 
 			if ( state.reviewedFiles[ fileTitle ] ) {
 				$btn.addClass( 'catdiff-reviewed' );
 				$btn.closest( '.gallerybox' ).addClass( 'catdiff-gallery-reviewed' );
 			}
-			if ( hasSuggestions ) {
+			if ( hasSuggestions( fileTitle ) ) {
 				$btn.addClass( 'catdiff-has-suggestions' );
 			}
 		}
@@ -1210,6 +1306,15 @@
 			'      <ul id="catdiff-suggestions-list"></ul>',
 			'      <div id="catdiff-suggestion-count"></div>',
 			'    </div>',
+			'    <div class="catdiff-section">',
+			'      <div class="catdiff-section-title">Your categories</div>',
+			'      <ul id="catdiff-custom-list"></ul>',
+			'      <form id="catdiff-custom-form">',
+			'        <input id="catdiff-custom-input" type="text" placeholder="New or existing category" />',
+			'        <button id="catdiff-custom-add" type="submit">Add</button>',
+			'      </form>',
+			'      <div id="catdiff-custom-status"></div>',
+			'    </div>',
 			'    <div class="catdiff-actions">',
 			'      <button class="catdiff-btn-accept">Accept</button>',
 			'      <button class="catdiff-btn-review" title="Opens the wikitext edit page in a new tab with the changes prefilled">Review in editor</button>',
@@ -1240,6 +1345,18 @@
 			e.preventDefault();
 			rejectSuggestions();
 		} );
+
+		$( '#catdiff-panel' ).on( 'change.catdiffusion', 'input[data-cat]', updateActionLabels );
+
+		$( '#catdiff-custom-form' ).on( 'submit.catdiffusion', function ( e ) {
+			e.preventDefault();
+			addCustomCategory();
+		} );
+
+		$( '#catdiff-custom-list' ).on( 'click.catdiffusion', '.catdiff-custom-remove', function ( e ) {
+			e.preventDefault();
+			removeCustomCategory( $( this ).attr( 'data-cat' ) );
+		} );
 	}
 
 	function openAnalysisPanel() {
@@ -1265,6 +1382,8 @@
 		$( '#catdiff-current-cats' ).empty().append( '<li>Loading…</li>' );
 		$( '#catdiff-suggestions-list' ).empty();
 		$( '#catdiff-suggestion-count' ).text( '' );
+		$( '#catdiff-custom-list' ).empty();
+		setCustomStatus( '' );
 		$( '.catdiff-btn-accept' ).prop( 'disabled', false );
 
 		$panel.addClass( 'catdiff-panel-open' );
@@ -1329,6 +1448,8 @@
 		// Suggested categories
 		var suggestions = state.suggestions[ fileTitle ] || [];
 		renderSuggestions( suggestions, currentCats );
+		renderCustomCategories( {} );
+		updateActionLabels();
 	}
 
 	// -----------------------------------------------------------------------
@@ -1356,29 +1477,12 @@
 		for ( i = 0, len = suggestions.length; i < len; i++ ) {
 			var catName = suggestions[ i ];
 			var isPresent = !!currentCatsSet[ catName ];
-			var $li = $( '<li>' );
-			var $label = $( '<label>' );
-			var $checkbox = $( '<input>' )
-				.attr( 'type', 'checkbox' )
-				.attr( 'data-cat', catName );
-
 			if ( isPresent ) {
-				$checkbox.prop( 'disabled', true ).prop( 'checked', false );
-				$label.addClass( 'catdiff-already-present' );
 				alreadyCount++;
 			} else {
-				$checkbox.prop( 'checked', true );
 				newCount++;
 			}
-
-			var catUrl = mw.util.getUrl( 'Category:' + catName );
-			var $link = $( '<a>' )
-				.attr( 'href', catUrl )
-				.attr( 'target', '_blank' )
-				.text( catName );
-			$label.append( $checkbox, ' ', $link );
-			$li.append( $label );
-			$list.append( $li );
+			$list.append( buildCategoryItem( catName, isPresent, !isPresent ) );
 		}
 
 		$count.text(
@@ -1386,22 +1490,228 @@
 			alreadyCount + ' already present, ' +
 			newCount + ' new'
 		);
+	}
 
-		// Update Accept and Review-in-editor button labels based on whether
-		// there are new categories. Both buttons relabel in lockstep so the
-		// "remove parent only" path reads coherently across both actions.
-		var hasNew = newCount > 0;
+	// A checkbox row for one category. Categories the file already has are
+	// shown struck through and can't be selected.
+	function buildCategoryItem( catName, isPresent, checked ) {
+		var $li = $( '<li>' );
+		var $label = $( '<label>' );
+		var $checkbox = $( '<input>' )
+			.attr( 'type', 'checkbox' )
+			.attr( 'data-cat', catName );
+
+		if ( isPresent ) {
+			$checkbox.prop( 'disabled', true ).prop( 'checked', false );
+			$label.addClass( 'catdiff-already-present' );
+		} else {
+			$checkbox.prop( 'checked', checked );
+		}
+
+		var catUrl = mw.util.getUrl( 'Category:' + catName );
+		var $link = $( '<a>' )
+			.attr( 'href', catUrl )
+			.attr( 'target', '_blank' )
+			.text( catName );
+		$label.append( $checkbox, ' ', $link );
+		$li.append( $label );
+		return $li;
+	}
+
+	// Render the user's own categories for the current file. They start
+	// unchecked (except those in checkedSet), since a category added for one
+	// file usually fits only some of the others. Categories that are already
+	// among this file's suggestions are shown there instead.
+	function renderCustomCategories( checkedSet ) {
+		var $list = $( '#catdiff-custom-list' ).empty();
+		var meta = state.fileMetadata[ state.currentFile ] || {};
+		var currentCats = meta.categories || [];
+		var suggested = state.suggestions[ state.currentFile ] || [];
+		var i, len, catName, $li;
+
+		if ( !state.customCategories.length ) {
+			$list.append(
+				$( '<li>' )
+					.addClass( 'catdiff-custom-hint' )
+					.text( 'Categories you add here stay available for the other files in this category.' )
+			);
+			return;
+		}
+
+		for ( i = 0, len = state.customCategories.length; i < len; i++ ) {
+			catName = state.customCategories[ i ];
+			if ( suggested.indexOf( catName ) !== -1 ) {
+				continue;
+			}
+			$li = buildCategoryItem(
+				catName,
+				currentCats.indexOf( catName ) !== -1,
+				!!checkedSet[ catName ]
+			);
+			$li.append(
+				' ',
+				$( '<button>' )
+					.addClass( 'catdiff-custom-remove' )
+					.attr( 'type', 'button' )
+					.attr( 'data-cat', catName )
+					.attr( 'title', 'Remove from this list (does not delete the category)' )
+					.html( '&times;' )
+			);
+			$list.append( $li );
+		}
+	}
+
+	function getCheckedCustomSet() {
+		var checked = {};
+		$( '#catdiff-custom-list input[data-cat]:checked' ).each( function () {
+			checked[ $( this ).attr( 'data-cat' ) ] = true;
+		} );
+		return checked;
+	}
+
+	// Update Accept and Review-in-editor button labels based on whether any
+	// categories will be added. Both buttons relabel in lockstep so the
+	// "remove parent only" path reads coherently across both actions.
+	function updateActionLabels() {
+		var hasNew = getSelectedCategories().length > 0;
 		$( '.catdiff-btn-accept' ).text( hasNew ? 'Accept' : 'Remove parent category' );
 		$( '.catdiff-btn-review' ).text( hasNew ? 'Review in editor' : 'Review removal in editor' );
 	}
 
 	function getSelectedCategories() {
 		var selected = [];
-		$( '#catdiff-suggestions-list input[type="checkbox"]:checked:not(:disabled)' )
+		$( '#catdiff-panel-file-view input[data-cat]:checked:not(:disabled)' )
 			.each( function () {
-				selected.push( $( this ).attr( 'data-cat' ) );
+				var cat = $( this ).attr( 'data-cat' );
+				if ( selected.indexOf( cat ) === -1 ) {
+					selected.push( cat );
+				}
 			} );
 		return selected;
+	}
+
+	// -----------------------------------------------------------------------
+	// User-added categories
+	// -----------------------------------------------------------------------
+	function getParentCatName() {
+		// wgPageName uses underscores, wikitext uses spaces
+		return state.categoryTitle.replace( /^Category:/, '' ).replace( /_/g, ' ' );
+	}
+
+	function setCustomStatus( text, isError ) {
+		$( '#catdiff-custom-status' )
+			.text( text )
+			.toggleClass( 'catdiff-error', !!isError );
+	}
+
+	// Resolves with true if the category had to be created, false if it
+	// already existed. Rejects with an error message, or with nothing if the
+	// user chose not to create it.
+	function ensureCategoryExists( title ) {
+		var api = new mw.Api();
+		var prefixed = title.getPrefixedText();
+
+		return api.get( {
+			action: 'query',
+			titles: prefixed,
+			format: 'json'
+		} ).then( function ( data ) {
+			var pages = data.query.pages;
+			var page = pages[ Object.keys( pages )[ 0 ] ];
+			if ( !page.hasOwnProperty( 'missing' ) ) {
+				return false;
+			}
+
+			var parentCat = getParentCatName();
+			if ( !window.confirm(
+				prefixed + ' does not exist yet.\n\n' +
+				'Create it as a subcategory of Category:' + parentCat + '?'
+			) ) {
+				return $.Deferred().reject().promise();
+			}
+
+			return api.postWithEditToken( {
+				action: 'edit',
+				title: prefixed,
+				text: '[[Category:' + parentCat + ']]',
+				summary: 'Diffusor: created subcategory of [[Category:' + parentCat + ']]' +
+					' ([[User:Alaexis/Diffusor.js|Diffusor]])',
+				createonly: 1
+			} ).then( function () {
+				return true;
+			}, function ( code, result ) {
+				var detail = ( result && result.error && result.error.info ) || code;
+				return $.Deferred().reject(
+					'Failed to create ' + prefixed + ': ' + detail
+				).promise();
+			} );
+		}, function () {
+			return $.Deferred().reject(
+				'Could not check whether ' + prefixed + ' exists.'
+			).promise();
+		} );
+	}
+
+	function addCustomCategory() {
+		var $input = $( '#catdiff-custom-input' );
+		var $add = $( '#catdiff-custom-add' );
+		if ( $add.prop( 'disabled' ) ) {
+			return;
+		}
+
+		var title = mw.Title.newFromText( $.trim( $input.val() ), 14 );
+		if ( !title || title.getNamespaceId() !== 14 ) {
+			setCustomStatus( 'Not a valid category name.', true );
+			return;
+		}
+		var name = title.getMainText();
+		var prefixed = title.getPrefixedText();
+		if ( name === getParentCatName() ) {
+			setCustomStatus( 'That is the category being diffused.', true );
+			return;
+		}
+
+		var check = state.customCategories.indexOf( name ) !== -1 ?
+			$.Deferred().resolve( false ).promise() :
+			ensureCategoryExists( title );
+
+		$add.prop( 'disabled', true );
+		setCustomStatus( 'Checking ' + prefixed + '…' );
+
+		check.then( function ( created ) {
+			if ( state.customCategories.indexOf( name ) === -1 ) {
+				state.customCategories.push( name );
+				saveCustomCategories();
+			}
+
+			// Select it for the file being viewed
+			var checked = getCheckedCustomSet();
+			checked[ name ] = true;
+			renderCustomCategories( checked );
+			$( '#catdiff-suggestions-list input[data-cat="' +
+				$.escapeSelector( name ) + '"]:not(:disabled)' ).prop( 'checked', true );
+			updateActionLabels();
+			updateThumbnailButtons();
+
+			$input.val( '' );
+			setCustomStatus( ( created ? 'Created ' : 'Added ' ) + prefixed + '.' );
+		}, function ( msg ) {
+			setCustomStatus( msg || '', !!msg );
+		} ).always( function () {
+			$add.prop( 'disabled', false );
+		} );
+	}
+
+	function removeCustomCategory( name ) {
+		var idx = state.customCategories.indexOf( name );
+		if ( idx === -1 ) {
+			return;
+		}
+		state.customCategories.splice( idx, 1 );
+		saveCustomCategories();
+		renderCustomCategories( getCheckedCustomSet() );
+		updateActionLabels();
+		updateThumbnailButtons();
 	}
 
 	// -----------------------------------------------------------------------
@@ -1443,9 +1753,7 @@
 			}
 
 			// Remove the parent category being diffused and remember where it was
-			var parentCat = state.categoryTitle.replace( /^Category:/, '' );
-			// Normalise underscores to spaces (wgPageName uses underscores, wikitext uses spaces)
-			parentCat = parentCat.replace( /_/g, ' ' );
+			var parentCat = getParentCatName();
 			// Escape regex special characters
 			var escapedCat = parentCat.replace( /[-.*+?^${}()|\\[\]\/]/g, '\\$&' );
 			// Allow both underscores and spaces to match interchangeably
@@ -1615,8 +1923,7 @@
 				if ( state.reviewedFiles[ nextTitle ] ) {
 					continue;
 				}
-				if ( !( state.suggestions[ nextTitle ] &&
-					state.suggestions[ nextTitle ].length ) ) {
+				if ( !canOpenFile( nextTitle ) ) {
 					continue;
 				}
 				openPanel( nextTitle );
@@ -1689,6 +1996,7 @@
 	function init() {
 		injectStyles();
 		loadReviewedState();
+		loadCustomCategories();
 
 		var hasCached = loadCachedSuggestions();
 
@@ -1714,7 +2022,7 @@
 	}
 
 	mw.loader.using(
-		[ 'mediawiki.api', 'mediawiki.util' ],
+		[ 'mediawiki.api', 'mediawiki.util', 'mediawiki.Title' ],
 		init
 	);
 
