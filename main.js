@@ -20,7 +20,11 @@
 		// URL of your Cloudflare Worker that proxies LLM requests
 		llmProxyUrl: 'https://publicai-proxy.alaexis.workers.dev/hf',
 		llmModel: 'openai/gpt-oss-20b',
-		llmMaxTokens: 2048,
+		// gpt-oss is a reasoning model: reasoning tokens count against
+		// max_tokens, and at the default effort it often loops over the long
+		// category list until the budget runs out, returning no JSON at all.
+		llmMaxTokens: 8192,
+		llmReasoningEffort: 'low',
 		llmTemperature: 0.1,
 
 		// Subcategory tree crawl limits
@@ -51,7 +55,9 @@
 		reviewedFiles: {},        // { "File:Foo.jpg": true, ... }
 		currentFile: null,        // file title currently shown in panel
 		subcategories: [],        // flat list of subcategory titles (without "Category:")
-		fileMetadata: {}          // { "File:Foo.jpg": { description, categories }, ... }
+		fileMetadata: {},         // { "File:Foo.jpg": { description, categories }, ... }
+		failedBatches: 0,         // LLM batches that returned no usable JSON
+		totalBatches: 0
 	};
 
 	// -----------------------------------------------------------------------
@@ -620,8 +626,8 @@
 			'For each file below, pick 3-5 categories from the above list that ' +
 			'best fit the file. Only pick categories from the list above. ' +
 			'If none of the listed categories fit well, return an empty list for that file.\n\n' +
-			'Output ONLY valid JSON in this exact format (use full filenames with "File:" prefix as keys):\n' +
-			'{"File:filename1.jpg": ["Cat1", "Cat2"], "File:filename2.jpg": ["Cat3"]}\n\n' +
+			'Output ONLY valid JSON in this exact format, using the file numbers below as keys:\n' +
+			'{"1": ["Cat1", "Cat2"], "2": ["Cat3"]}\n\n' +
 			'Files:\n\n' + filesSection.join( '\n\n' );
 	}
 
@@ -634,49 +640,53 @@
 				model: CONFIG.llmModel,
 				messages: [ { role: 'user', content: prompt } ],
 				max_tokens: CONFIG.llmMaxTokens,
+				reasoning_effort: CONFIG.llmReasoningEffort,
 				temperature: CONFIG.llmTemperature
 			} ),
 			dataType: 'json',
 			timeout: 120000
 		} ).then( function ( data ) {
-			if ( data.choices && data.choices[ 0 ] ) {
-				return data.choices[ 0 ].message.content || '';
-			}
-			return '';
+			var choice = data.choices && data.choices[ 0 ];
+			return {
+				content: choice && choice.message.content || '',
+				finishReason: choice && choice.finish_reason || ''
+			};
 		} );
 	}
 
-	function parseLLMResponse( responseText, validCatsSet ) {
+	// Returns { "File:Foo.jpg": [cats] } keyed by the real titles in
+	// batchTitles, or null if the response contains no parseable JSON.
+	function parseLLMResponse( responseText, validCatsSet, batchTitles ) {
 		// Extract JSON from response (LLM may include markdown fences)
 		var jsonMatch = responseText.match( /\{[\s\S]*\}/ );
 		if ( !jsonMatch ) {
-			mw.log.warn( 'CategoryDiffusion: no JSON in LLM response' );
-			return {};
+			return null;
 		}
 
 		var parsed;
 		try {
 			parsed = JSON.parse( jsonMatch[ 0 ] );
 		} catch ( e ) {
-			mw.log.warn( 'CategoryDiffusion: failed to parse LLM JSON', e );
-			return {};
+			return null;
 		}
 
 		var result = {};
-		var fileTitle, cats, validated, i, len, cat;
+		var key, fileTitle, cats, validated, i, len, cat;
 
-		for ( fileTitle in parsed ) {
-			if ( !parsed.hasOwnProperty( fileTitle ) ) {
+		for ( key in parsed ) {
+			if ( !parsed.hasOwnProperty( key ) ) {
 				continue;
 			}
-			cats = parsed[ fileTitle ];
+			cats = parsed[ key ];
 			if ( !$.isArray( cats ) ) {
 				continue;
 			}
 
-			// Normalise file title
-			if ( fileTitle.indexOf( 'File:' ) !== 0 ) {
-				fileTitle = 'File:' + fileTitle;
+			// Keys are 1-based file numbers from the prompt. The model mangles
+			// long filenames when echoing them, so we never key on names.
+			fileTitle = batchTitles[ parseInt( key, 10 ) - 1 ];
+			if ( !fileTitle ) {
+				continue;
 			}
 
 			validated = [];
@@ -745,6 +755,8 @@
 		state.suggestions = {};
 		state.subcategories = [];
 		state.fileMetadata = {};
+		state.failedBatches = 0;
+		state.totalBatches = 0;
 		state.analysisStatus = 'running';
 
 		// Acquire a Web Lock to prevent the browser from freezing this tab
@@ -819,6 +831,8 @@
 		var totalBatches = Math.ceil( fileTitles.length / CONFIG.filesPerBatch );
 		var batchIdx = 0;
 		var allSuggestions = {};
+		state.failedBatches = 0;
+		state.totalBatches = totalBatches;
 
 		// Build valid category set for validation
 		var validCatsSet = {};
@@ -832,11 +846,12 @@
 				// All batches done
 				state.suggestions = allSuggestions;
 
-				// Ensure every file has an entry
 				for ( i = 0, len = fileTitles.length; i < len; i++ ) {
-					if ( !allSuggestions[ fileTitles[ i ] ] ) {
-						allSuggestions[ fileTitles[ i ] ] = [];
-					}
+					allSuggestions[ fileTitles[ i ] ] = addExistingSubcategories(
+						allSuggestions[ fileTitles[ i ] ] || [],
+						( metadata[ fileTitles[ i ] ] || {} ).categories || [],
+						validCatsSet
+					);
 				}
 
 				state.analysisStatus = 'done';
@@ -872,18 +887,47 @@
 
 			var prompt = buildLLMPrompt( subcatNames, fileBatch );
 
-			return callLLM( prompt ).then( function ( responseText ) {
-				var batchResult = parseLLMResponse( responseText, validCatsSet );
-				$.extend( allSuggestions, batchResult );
+			return callLLM( prompt ).then( function ( response ) {
+				var batchResult = parseLLMResponse(
+					response.content, validCatsSet, batchTitles
+				);
+				if ( batchResult ) {
+					$.extend( allSuggestions, batchResult );
+				} else {
+					state.failedBatches++;
+					mw.log.warn(
+						'CategoryDiffusion: LLM batch ' + batchIdx + ' returned no usable JSON' +
+						' (finish_reason: ' + ( response.finishReason || 'unknown' ) + ').' +
+						' Raw response:', response.content
+					);
+				}
 				return processBatch();
 			}, function ( err ) {
-				mw.log.warn( 'CategoryDiffusion: LLM batch failed', err );
+				state.failedBatches++;
+				mw.log.warn( 'CategoryDiffusion: LLM batch ' + batchIdx + ' failed', err );
 				// Continue with next batch
 				return processBatch();
 			} );
 		}
 
 		return processBatch();
+	}
+
+	// A file that is already in a subcategory of the category being diffused
+	// only needs the parent removed. Offer those subcategories as suggestions
+	// even if the LLM missed them, so the user can apply the removal with
+	// one click. They render as "already present", which switches the
+	// panel buttons to "Remove parent category".
+	function addExistingSubcategories( suggestions, currentCats, validCatsSet ) {
+		var result = suggestions.slice();
+		var i, len, cat;
+		for ( i = 0, len = currentCats.length; i < len; i++ ) {
+			cat = currentCats[ i ];
+			if ( validCatsSet[ cat ] && result.indexOf( cat ) === -1 ) {
+				result.push( cat );
+			}
+		}
+		return result;
 	}
 
 	// -----------------------------------------------------------------------
@@ -980,6 +1024,15 @@
 				$status.html(
 					'<strong>Analysis complete.</strong><br>' +
 					'No suggestions were generated for any file.'
+				);
+			}
+
+			if ( state.failedBatches > 0 ) {
+				$status.append(
+					'<br><span style="color: #d33;">' + state.failedBatches + ' of ' +
+					state.totalBatches + ' LLM batches failed; their files only have ' +
+					'suggestions based on existing subcategories. See the browser ' +
+					'console for details, or re-run the analysis.</span>'
 				);
 			}
 		} else if ( state.analysisStatus === 'error' ) {
