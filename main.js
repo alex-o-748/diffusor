@@ -221,6 +221,11 @@
 			'  font-size: 13px;',
 			'}',
 			'.catdiff-btn-accept:hover { background: #0d6b56; }',
+			'.catdiff-btn-accept:disabled, .catdiff-btn-accept:disabled:hover {',
+			'  background: #c8ccd1;',
+			'  color: #72777d;',
+			'  cursor: default;',
+			'}',
 			'.catdiff-btn-reject {',
 			'  flex: 1;',
 			'  padding: 8px;',
@@ -1207,6 +1212,7 @@
 		$( '#catdiff-current-cats' ).empty().append( '<li>Loading…</li>' );
 		$( '#catdiff-suggestions-list' ).empty();
 		$( '#catdiff-suggestion-count' ).text( '' );
+		$( '.catdiff-btn-accept' ).prop( 'disabled', false );
 
 		$panel.addClass( 'catdiff-panel-open' );
 		$( 'body' ).addClass( 'catdiff-panel-active' );
@@ -1467,6 +1473,17 @@
 	}
 
 	function acceptSuggestions() {
+		var $accept = $( '.catdiff-btn-accept' );
+		if ( $accept.prop( 'disabled' ) ) {
+			return;
+		}
+		var startFile = state.currentFile;
+		$accept.prop( 'disabled', true );
+		function reenable() {
+			if ( state.currentFile === startFile ) {
+				$accept.prop( 'disabled', false );
+			}
+		}
 		prepareEdit().then( function ( prep ) {
 			prep.api.postWithEditToken( {
 				action: 'edit',
@@ -1477,6 +1494,7 @@
 				markAsReviewed( prep.fileTitle );
 				mw.notify( 'Saved categories on ' + prep.fileTitle, { type: 'success' } );
 			}, function ( err ) {
+				reenable();
 				mw.log.warn( 'CategoryDiffusion: API edit failed', err );
 				var detail = ( err && err.error && err.error.info ) || err || 'unknown error';
 				mw.notify( 'Failed to save ' + prep.fileTitle + ': ' + detail, {
@@ -1484,7 +1502,7 @@
 					autoHide: false
 				} );
 			} );
-		} );
+		}, reenable );
 	}
 
 	function openSuggestionsInEditor() {
