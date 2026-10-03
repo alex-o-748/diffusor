@@ -626,6 +626,14 @@
 			'Files:\n\n' + filesSection.join( '\n\n' );
 	}
 
+	function describeXhrError( xhr ) {
+		if ( !xhr || typeof xhr.status === 'undefined' ) {
+			return String( xhr );
+		}
+		return 'HTTP ' + xhr.status + ' ' + ( xhr.statusText || '' ) + ': ' +
+			String( xhr.responseText || '' ).slice( 0, 500 );
+	}
+
 	function callLLM( prompt ) {
 		return $.ajax( {
 			url: CONFIG.llmProxyUrl,
@@ -899,7 +907,8 @@
 				return processBatch();
 			}, function ( err ) {
 				state.failedBatches++;
-				mw.log.warn( 'CategoryDiffusion: LLM batch ' + batchIdx + ' failed', err );
+				mw.log.warn( 'CategoryDiffusion: LLM batch ' + batchIdx + ' failed. ' +
+					describeXhrError( err ) );
 				// Continue with next batch
 				return processBatch();
 			} );
